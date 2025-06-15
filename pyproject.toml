@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sinking-funds"
+version = "0.1.0"
+description = "Sinking funds simulator and tracker"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
