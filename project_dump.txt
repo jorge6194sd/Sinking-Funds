@@ -1,0 +1,2076 @@
+./.git/COMMIT_EDITMSG
+------ BEGIN FILE ------
+added package structure, as well as first foundation tests
+------  END FILE  ------
+./.git/config
+------ BEGIN FILE ------
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[remote "origin"]
+	url = https://github.com/jorge6194sd/Sinking-Funds.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+	vscode-merge-base = origin/main
+	vscode-merge-base = origin/main
+[branch "feat/persist-snapshot-io"]
+	vscode-merge-base = origin/main
+------  END FILE  ------
+./.git/description
+------ BEGIN FILE ------
+Unnamed repository; edit this file 'description' to name the repository.
+------  END FILE  ------
+./.git/FETCH_HEAD
+------ BEGIN FILE ------
+4db80248a1b54f9ed109c8cfcdc2fe55739e7051		branch 'main' of https://github.com/jorge6194sd/Sinking-Funds
+------  END FILE  ------
+./.git/HEAD
+------ BEGIN FILE ------
+ref: refs/heads/feat/persist-snapshot-io
+------  END FILE  ------
+./.git/hooks/applypatch-msg.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+------  END FILE  ------
+./.git/hooks/commit-msg.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+------  END FILE  ------
+./.git/hooks/fsmonitor-watchman.sample
+------ BEGIN FILE ------
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	my $last_update_line = "";
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+		$last_update_line = qq[\n"since": $last_update_token,];
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {$last_update_line
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+------  END FILE  ------
+./.git/hooks/post-update.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+------  END FILE  ------
+./.git/hooks/pre-applypatch.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+------  END FILE  ------
+./.git/hooks/pre-commit.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff-index --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+------  END FILE  ------
+./.git/hooks/pre-merge-commit.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+------  END FILE  ------
+./.git/hooks/pre-push.sample
+------ BEGIN FILE ------
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+------  END FILE  ------
+./.git/hooks/pre-rebase.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+------  END FILE  ------
+./.git/hooks/pre-receive.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+------  END FILE  ------
+./.git/hooks/prepare-commit-msg.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+------  END FILE  ------
+./.git/hooks/push-to-checkout.sample
+------ BEGIN FILE ------
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+------  END FILE  ------
+./.git/hooks/sendemail-validate.sample
+------ BEGIN FILE ------
+#!/bin/sh
+
+# An example hook script to validate a patch (and/or patch series) before
+# sending it via email.
+#
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to prevent the email(s) from being sent.
+#
+# To enable this hook, rename this file to "sendemail-validate".
+#
+# By default, it will only check that the patch(es) can be applied on top of
+# the default upstream branch without conflicts in a secondary worktree. After
+# validation (successful or not) of the last patch of a series, the worktree
+# will be deleted.
+#
+# The following config variables can be set to change the default remote and
+# remote ref that are used to apply the patches against:
+#
+#   sendemail.validateRemote (default: origin)
+#   sendemail.validateRemoteRef (default: HEAD)
+#
+# Replace the TODO placeholders with appropriate checks according to your
+# needs.
+
+validate_cover_letter () {
+	file="$1"
+	# TODO: Replace with appropriate checks (e.g. spell checking).
+	true
+}
+
+validate_patch () {
+	file="$1"
+	# Ensure that the patch applies without conflicts.
+	git am -3 "$file" || return
+	# TODO: Replace with appropriate checks for this patch
+	# (e.g. checkpatch.pl).
+	true
+}
+
+validate_series () {
+	# TODO: Replace with appropriate checks for the whole series
+	# (e.g. quick build, coding style checks, etc.).
+	true
+}
+
+# main -------------------------------------------------------------------------
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = 1
+then
+	remote=$(git config --default origin --get sendemail.validateRemote) &&
+	ref=$(git config --default HEAD --get sendemail.validateRemoteRef) &&
+	worktree=$(mktemp --tmpdir -d sendemail-validate.XXXXXXX) &&
+	git worktree add -fd --checkout "$worktree" "refs/remotes/$remote/$ref" &&
+	git config --replace-all sendemail.validateWorktree "$worktree"
+else
+	worktree=$(git config --get sendemail.validateWorktree)
+fi || {
+	echo "sendemail-validate: error: failed to prepare worktree" >&2
+	exit 1
+}
+
+unset GIT_DIR GIT_WORK_TREE
+cd "$worktree" &&
+
+if grep -q "^diff --git " "$1"
+then
+	validate_patch "$1"
+else
+	validate_cover_letter "$1"
+fi &&
+
+if test "$GIT_SENDEMAIL_FILE_COUNTER" = "$GIT_SENDEMAIL_FILE_TOTAL"
+then
+	git config --unset-all sendemail.validateWorktree &&
+	trap 'git worktree remove -ff "$worktree"' EXIT &&
+	validate_series
+fi
+------  END FILE  ------
+./.git/hooks/update.sample
+------ BEGIN FILE ------
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+------  END FILE  ------
+./.git/index
+------ BEGIN FILE ------
+DIRC      hN@(¹ğ<hN@(¹ğ<          ¤           <}xuŸrİè"WX “»j­ÁYŞM 	README.md hN 0	‘ø”hN 0	 §ô          ¤          $‡İóÙõEIÛ¿Ì2Â ó+ŞuÄ 4__pycache__/sinking_funds_simulation.cpython-311.pyc      hN*èbu0hN*è&Wà          ¤          	jíº(‰¥SçAJõ('ğX[ëÑ pyproject.toml    hN*şú\ hN*şú\           ¤           jWşPh5|Y€ğ;ÚÎÔÒ²lw sinking_funds.egg-info/PKG-INFO   hN*ş7=ÈhN*ş*¹l          ¤           ş\èDzÇ·zËzlªµ›üİ8	¨ "sinking_funds.egg-info/SOURCES.txt        hN*şÌĞhN*şÌĞ          ¤           ‹x‘yéi'­xæK
+­{ŞĞ‹Ü +sinking_funds.egg-info/dependency_links.txt       hN*ş(	ühN*ş(	ü          ¤           £!J’§ÅÄ#&Ÿõ•
+¬Q3t¡ $sinking_funds.egg-info/top_level.txt      hN*ª!JgŒhN*ª!JgŒ          ¤           1ë09¢ş¬Á+™Ùˆ„e÷&õ­ê sinking_funds/__init__.py hN+,;>JPhN+,;>JP          ¤           IJ#à{İÆñ#<Å¸K€E- 2sinking_funds/__pycache__/__init__.cpython-311.pyc        hN+,;{)„hN+,;{)„          ¤          $‡@Hmúš§•‚Ğ,dù9¦ëÉ 4sinking_funds/__pycache__/simulation.cpython-311.pyc      hNx#ĞhhSl±å	”          ¤          0bü
+²‘}Ïö²¥tÒjÌª¬~R sinking_funds/simulation.py       hN+,:ğŒhN+,;—|          ¤          7Ì¶Ù×ÉÄ¶€²eµòß¤4Rš]± Atests/__pycache__/test_sinking_funds.cpython-311-pytest-8.4.0.pyc hN*Ë!
+ hN*Ë!
+           ¤          X/İ0¸	Xû\l5Î,ÿï¹Æ \ tests/test_sinking_funds.py       TREE   ù 13 4
+5·ÓÜ;Æ9½Íú­U¨èòœÄtests 2 1
+UÔúĞÜUõ&àXJ©#I	P__pycache__ 1 0
+¿Ö·>cü÷ü˜ïÈXËçµ)__pycache__ 1 0
+bÕÇ–òwvãÙ7Öò)ÎŸ‘èÄÔsinking_funds 4 1
+Ã¥ßåÙ(e“6ĞÏù*kûs1__pycache__ 2 0
+”­¹Úòùïæ&l)éZÅ1Msinking_funds.egg-info 4 0
+÷¸?x¤â ¸D<šËÂ+I³¦y?óK2*öÕù w|µkwL------  END FILE  ------
+./.git/info/exclude
+------ BEGIN FILE ------
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+------  END FILE  ------
+./.git/logs/HEAD
+------ BEGIN FILE ------
+0000000000000000000000000000000000000000 4db80248a1b54f9ed109c8cfcdc2fe55739e7051 Jorge Vasquez <vasquezjorgito619@gmail.com> 1749943616 -0700	clone: from https://github.com/jorge6194sd/Sinking-Funds.git
+4db80248a1b54f9ed109c8cfcdc2fe55739e7051 f594a75a428243f82ad0af1931a269fb51ae25aa Jorge Vasquez <vasquezjorgito619@gmail.com> 1749943719 -0700	commit: add initial python file
+f594a75a428243f82ad0af1931a269fb51ae25aa e7acccfd35afdfcc291c158108cd5b8187e4c388 Jorge Vasquez <vasquezjorgito619@gmail.com> 1749955798 -0700	commit: added package structure, as well as first foundation tests
+e7acccfd35afdfcc291c158108cd5b8187e4c388 e7acccfd35afdfcc291c158108cd5b8187e4c388 Jorge Vasquez <vasquezjorgito619@gmail.com> 1750303985 -0700	checkout: moving from main to feat/persist-snapshot-io
+------  END FILE  ------
+./.git/logs/refs/heads/feat/persist-snapshot-io
+------ BEGIN FILE ------
+0000000000000000000000000000000000000000 e7acccfd35afdfcc291c158108cd5b8187e4c388 Jorge Vasquez <vasquezjorgito619@gmail.com> 1750303985 -0700	branch: Created from HEAD
+------  END FILE  ------
+./.git/logs/refs/heads/main
+------ BEGIN FILE ------
+0000000000000000000000000000000000000000 4db80248a1b54f9ed109c8cfcdc2fe55739e7051 Jorge Vasquez <vasquezjorgito619@gmail.com> 1749943616 -0700	clone: from https://github.com/jorge6194sd/Sinking-Funds.git
+4db80248a1b54f9ed109c8cfcdc2fe55739e7051 f594a75a428243f82ad0af1931a269fb51ae25aa Jorge Vasquez <vasquezjorgito619@gmail.com> 1749943719 -0700	commit: add initial python file
+f594a75a428243f82ad0af1931a269fb51ae25aa e7acccfd35afdfcc291c158108cd5b8187e4c388 Jorge Vasquez <vasquezjorgito619@gmail.com> 1749955798 -0700	commit: added package structure, as well as first foundation tests
+------  END FILE  ------
+./.git/logs/refs/remotes/origin/HEAD
+------ BEGIN FILE ------
+0000000000000000000000000000000000000000 4db80248a1b54f9ed109c8cfcdc2fe55739e7051 Jorge Vasquez <vasquezjorgito619@gmail.com> 1749943616 -0700	clone: from https://github.com/jorge6194sd/Sinking-Funds.git
+------  END FILE  ------
+./.git/logs/refs/remotes/origin/main
+------ BEGIN FILE ------
+4db80248a1b54f9ed109c8cfcdc2fe55739e7051 f594a75a428243f82ad0af1931a269fb51ae25aa Jorge Vasquez <vasquezjorgito619@gmail.com> 1749943723 -0700	update by push
+f594a75a428243f82ad0af1931a269fb51ae25aa e7acccfd35afdfcc291c158108cd5b8187e4c388 Jorge Vasquez <vasquezjorgito619@gmail.com> 1749955805 -0700	update by push
+------  END FILE  ------
+./.git/objects/17/dd081cf3d9f54549dbbfcc32c220f32bde75c4
+------ BEGIN FILE ------
+x½:mlGvË‰¢ø!~I$E-)JõAQ_-+²d)íZJRÉ	*Ùa(îJ¢C‘Ê’r,zY¸»–WøºQ µ(|:¤(T ?ŒşJk›_ÅÒ`‘Å‡BmÑ2Èü'}3»+’²¤½CWË73oŞ¼÷æÍ›7oÖ^K¦×Èc#ÄÏ[[õ<÷Ô‹›ÎAüjÈO«Tù†TÄÇ„îÄ5L5ıX±BĞ
+ªù}%¢eîSJKéà§ßSS-P¤z+”F©n‚Ò,Õ-¸Ş†é­P·Ix;”©î„Ò@µcš¨»Dü†nEI¹WT”‡ê¤¼{Jª‹"
+	úöT+jÊ1İT ğ~ª`7Õ‹aÃ>€¡½æ•&ªŸ€z?e8¸§\iV4A+)‚¢ÕtİL©h¥úËğA|?ñYÑPÊ%ıB‘£#A©ˆÅå#ñc2h „
+~ßœª	Võ@™ ò*VK5Û„Ë&Jùc‚%æ‰'@úüÄ'Oly]ñ–VóZŸcæ‰¢òöòzVI©r°¤¬>””:×P…êù–—ú`ÑòVÁp+ÛÌÌ"Ù·§óFÖH5uÈÂX`5j0ÀkNÁñ'Fks-‘ki&DwOyOYãÁšràhqU\9^«˜ë´ĞÕ(óÖÂ6İEZ´²-ëJ¶‰µÔz´Ğ×0ù¶F
+qT]¿•µ¢H.ÛÆZ£™µˆZP-§®ƒ2œŠ·ƒÖ¬õml»z­'´j§Zó¬“UƒÆ^VÍ:kí¯'²¶üˆzS­O`½>Ãõ v¶¯œ‹uÁ
+arF	Ü]§XÙUoeÖÅÚY'wëkßÅú/¢¿ê½œ	â„NnÖ}-^±—æàa=Ç¾e?EkOƒÖÖ&éºŒl²APÆ=U¾ëıŸ§èİàÃyo<P~¬šİ)Ó‰yt5Ğ‚­¾‡–D¬õç}”9ïg}ÇóÒRhµ}¢¦¬Ÿªòş”÷‰«e£lYˆòÃúwumğìF³¯É¡Z¥=ÙJÙOôÈ²ºaT <Í6	¾]7úÚû=ù^¶—íAñ"dƒu; %s	¤<¸OÔØN94¡q ¥Ğl'Õ^ÓxÇy®r	úyÙ.–dıl7 :öND6ñğ¿Xİc;¥+ 
+>ü	«e²qä‡r¤buåş!ßÇöQîš~ù´=uíş.lè‚ò²ıT×'êOÕ'y6Ğ’'{s%@úäØ†ëC[İÿ©2?HuC½Âz ~ã5-ÑÀ‡º§†ÍC»·®¸ëÚª0uqŠ
+‡ö³ƒÔ ”ƒl—CìşÚü;ÌhÙ F1íKÀuK¸î:\DÂEj¸zÛ°#'móğşc=5Ìj¨È8-?C'&~«ƒCv$öWZ‚Ğ“ğÄcYz#Í$èÌ$y#‘É®R‰xöö IÇâ›ä‡‰ìæ$&C¤÷k¨LÅ¶èà$™É2ƒk±d,G}ëÉt,{¢w+Ên&w£q(™ÄÚN6‘NAÛfä$?İ$Ş’‘pdœ\O3äx™Hei†ÎdÕÈëq5“1Ùè.cAMTÇÂ'ÉåM&¤STŒ!Qÿ0î wÓ;ä½‘H‘Y&?‘Ú‹œ’;[Û™-°Ñ<˜gÍY¬õ‰ÜñğĞ 8áÛ·%EDMëÌ\N§“˜SÍªo42:1H^M’˜ÙñDÈ|õ‚sé•>sôH†DNŒ—Xå¥r¥2`0r‰ŞÎ’¢X¬¹Ag3d,EÒ÷`îd ô¸ˆèŞˆËdXºH@bÀG²qÉ>Û±İ-:•Æ¨;;™,ªş?˜jhô72ÕDãèS%š†¢·Ó™D–LdÈÀh„LÒ™“&mSO7!·Ò]oBIBòÚìf,°Èt*¹’ì¸¾“İaè†½oÆRh{şf®w-u¶ZšÓ=èÜ yîÿ;Õ,X{¼£`‹ )^ßIÑÈ›€IöV°N˜avƒr-–¡ÅYŸ ’0°8[ŠÜ¦™­X
+´Mî’Ù4öÇp$‚w|,™$EC‰¼2dßN*›HmÄ)Ù¤ØÈ N“älBIàµur™Ù¡¥p'ÅÂ]÷Hˆ>Óà"	Ø2}ĞõKÑ„õCSÅV ÓëbÀÄÂ¤µLíl‰ñ–„K¯¦?$ab»²ê0·Lbk'	aB¸b™ŞŞ®Å»4³–ÎĞ§ë½Í kØ·$D§­¶Š­%é0ùèÆ|˜ s£I24øÌiLÅ²1IÅßÑµõŠ¼ğ‘„#Í
+’•`M@
+ß`eP³6ú¥#Gğ6P±.ŒA¼ŠrÀB§öÖÎ$èÆ‡Ò‰x‰Xœuü x¬;9%ãŞï= Äñ[ip©¨´¡i
+ô8å,Ã¤rè7
+‹ğ>&ÏDA’â™EúûûûÉ7ÅH	6‰34lŠ\ÛEŞœúı’›ˆJgÏ©œE²zş7n.¼I.İ\ gß|óÆµ×æ'ÉÀ:ÎâÖQ>†¥PÓ 	$Ô³_@!¶dı°s³áTqyùXDJËçI.aÇgÃ{§Ø;·Æ6YŒ×ßêĞÄ
+¿o|÷z–¸mÉ+îöŠÆé‘òaÛñ"¤ÔÈ¡”áˆ oË ë I¾¸17yëf†f2·®§™š|;–ù`‡ÎİÊ$R(¸²“¢n-‰õ!ÔÈÈ=ÑuÔŠJ;2šğöîıÚ=ñôÖötnPbñ2áT2©Hf:\£^m2^ Î2*¾ûª?	3BCÇ¨o€‚`PnÇ + ¯?B8A#yøjDßŒ FÛE°aËˆ½vEŒ°]I¨|L$][ò
+VAµ¬—Rü±ò¡l©dÚ€ì_á‡İÁô¹F2(ƒ>×€¹¸©w'ÉÎK~–JªÒ•½–ı%±1İÿ}Œ†Ÿ®:ã„®´vÇ:£l]Ö¹ó5¿‡c¥ø~ïŞûcb Ö™q qH%¨QœtÇAQĞ×"àrMÈ¹Î9Uxt=§Fá£‘Œ¢ëcLÎ‰XœrAÔñvö÷6ŠbÜhbìŒ	êŒÍÂ;Vû©ÑS06Æ<ÁUn£TÑ/][ük‹¯“Wn.Î/‘KsW_›¿yã5²ëœœäãÙ…ô¯şVmÆà…BÿB1$¨"£TîÊĞoå9¢0ßŠ ƒ|ŸéB€DÀ §$Éœjj4òBAæ”SçsÍä<½=IBy9–„R55Éµë—Ä¤BÄê­í$ùd9-ö²LXjš”Y
+*Hı¡'1d-#4Ç¶·án$4áì"4Š—SĞ×®SBKİuJĞÊ·#Á*/gİ=@pOR+˜±:ué™ ¯åM‚FÊ}&«%&B‹ˆH¤(ú`‰ï0¤%bº‚m©hf3±r7Â1è‹† •³A¡ë×ÊD³›‰ŒÈMĞÂ^ŒâèiN'©†Ô\0§è1Ùs·c	Jh«ñ‘s	ÁYg£zAx³”"Ë,a5¨;‚QÊB¢âîl²s¢°¦QĞPh“±5‘‚^4JøÑ»±$>p¥õ8»ñ DdOø›Ğ„g-4á©
+ÍTb}=—Y'RëiA±+(¶D;á6é(
+W@TUŒòäÅ4I0JÖ—Rp¥DŠF”™QX&”(üï|àíg¶Ì*pEiDÆôÕ5%¡5s'oµ´¼ÆÅiü¼—ä´n^ãç4ı|o§í®6mcpêîç ”-£ËèƒëÏíŞø•ÓSZ);û*Î¾*qGÑ4ğ5†…–çŞĞÁìÏÒ‡îrçÔçÊ²çòço•=W8m_ßÑVöÌô¼§÷ÀUöŒ Èà©jİ0ïôU	Uë0EouwOî+>š.NïÇB‘:üàYïy®÷<ßåß¿°÷û‡ÖÃ›ãzJ•G.—»æŠWy›³¤+./îo–maT}´ømUOqÚ oí¬­aawºJçß/\åMNÎ}3¡—·‘œŒ³sç—¸å[•ó·9+zù`?70[	^æl>xùóó•à/’Ü­-n!U	¦vôrqk—mÃüì[ÜRœ›¡8ÛØáÕ²íÕoaší3
+8¸¯(;/Uœ—
+•Oûáp,w¾V–ÖÅûœ¶ë9RÖ¨‹` ª‚1î>¾X˜çİ^®k¢â>W¸Á·Ù¡Ãdåœıœ	½¼#t¨8†¿tŒ=sŒŞâæ–¹ñ›Ü;+eÇjÅ±ZT=ïÌ•;‡‹¼©s_ñÌäãL>Ş(A½VsQWX,,>\,¥Ê†ATıé"œàŞR¶lğƒÃœ¡{¾lq†°y«D³î<õvü|êÏ§Õ‡kåî•îœä}_ú.<ó]x:Å][á&W¹Ûï•}±Š/Üy“oö™©‡3õğfkñZÑX4>6rşñ²yÕùWŠ†ÒrÙìÿ¶ª%ì>¾£ŸwyªµCãĞôU#V§Ogª êÕqt”zß)¼ş•Ã]šÛ×í-Ì–áŠ#(Ä.Wü“OgËéŠgº° 3s†¨Šc¬ğ:èå>Şä(Yşè~á>ß÷öçïp}o×^sgîá-í¥‘ÜE7ß·ú÷K_8ÿîÖ/oq}«µ×ÜL½$2»»4_ùÎ=39S÷½ótêuåâç{çøÅËÑ?ÈzñêÊÙ5ı4[éšd(6wøï¾ıgÅfŞÚQšıh²8É¼Ï­Æ8€Ç¯-ÌÙÂ¼İ]Š}´R\áG¶ÿyõ].J—W×+«ëÜÈvíÅ” ¤½ã¹ÁQd+†À—†g†¾İÃ;½¼ÛÏFøĞ4ïğá«U“vÈX% |Mh[M¿F š2°ºö/µŞgZo)WÖöW´ıœ¶*À^tŞ¦yÅWÚVÎøzY{µ¢½Êi¯ò®P•pëH
+×y3ìËŠÙ_˜Eµ‹s°0û•ÁÂµù‹ €·4"– Ë†îŠ¡<(Š½?]x¸PX€è²ÏV<ãUÂÑ
+Lµ|gÏ>½=X*wF8×+ÇoQÃ»^)mîïV¼#È™Ò&¼PñNr®ñ-j`
+ş~®¶â»\4ò¾×?Yñ]”ªW*¾×ÑÒ)ìS¥öıŞJGˆ³½Z% ‰Á¡¦¡É{º9ÛÅªJîæÃíªŠ°t@è²ùa´e‚·yöUû©29^¶C¨³B¬üÁè_™íÅÍG¦Ç¦"üU‡Àÿ&tFÎ:˜<¼_ÖÎU´sœvîy‹‹S»p–.h£p<%RÑ¨Ğ„¿â´]ºZ]›	©Å4e¸º:á„7g»¼§úRXû–‘-Ïš¹d>ÆH˜³€YŠİ…;¦L“˜ôµ‘ÿñÖSïOşı¯/½0ÍÁ'ëP'K§ĞWv‘åƒ·f„¦9ôyXñ{3BóU:–Ìn2fĞIh^fbwé¤Ô»8st°GèŸ.™ !%ÜåĞMãÎE¸×ı›êøj™@Ø?E4*æ6Ìï!„4eTâœøÛï¾û.1lâŸPí_5‹CcˆÕâ t8İıË?\åÑù³@¾5‘~j!ND™a„…ÿeA0# LC`	ÎiñŒğyqqq_’—‹’ ´¨(©ƒEµ6f‰Ôö¤S8u‚ü,-_êi¡UÎs£(óÚå\¦.Ù{¤¯“r‡ÿ‰CşŒ+Rè?±‰Otƒ/ËÚ©­4µ“¤§™»€Ã¹
+	›C¡€-g¶ñfßjAÁˆğöŞdáæªõJá†ä$|OC¨…Ü3U§B[È1ÌÅúx«³ªkÒÁ™€‘°œ÷~/>ô¦ß+óq€\=’ äŠú =Â×éÓ)ÓÛ ß‚è ı1¾O\ñŠ»™S;«ğıÇÕÉ©0Óvßî®6©Ú`,z¢ÕQÌTUJ›N©î6T-{s• ğ`¡ê'Z%Ğ ı1M'®¿Œ·ÕÑØëøC½ÛFO œÚSEÂîS§4`G Óô N¨ÚKˆ3Ã²ô‚Ey›·xyÏ8˜ç;:y+$¶ªUoişš ğk\CÕ˜ŠP»`iq¤ú[èâ«------  END FILE  ------
+./.git/objects/2f/dd30b80958fb5c6c3514ce2cffefb9c6201c5c
+------ BEGIN FILE ------
+xÕXmÜDå÷œ¢ä43L†Y‚Ä
+#BPHAQ¿–•Õ3ÓqÖî6İv²fµR®À¸wà(9	¯ºı5_‰	
+ó#k÷GuuÕ{¯ÊY¤zAŸ}qwşAƒBÚÂ~ÊÿF6QW‰ZGq©VvšWƒŸUR¼|ñ»[B±6´µë³2E¢ÕôØÄàq©èyRlÎ‰òŠøĞA’åÚ´Ô8%6:£•\&™H©øÖ¿¶ë½ƒúŞï,6’àç’O'ø+9ëÎØ–7É­Áïƒ¬Şy{?XûN¦9Š“ë¢4Ò¾eûƒ¯}4¦µıÁJÆ´VFKQÈµ6‰´ÃÑù€ğC°K8¡HP–(b:é˜8„İJ[PiåŠåæäµÈòTN9alËxCî…nÚ'~”ÈdpNÁdùRL¶ç"jÉKf§§ÓÓÓéL«b“VÑM²(9³X{`¥È›˜Í'|ğÎï„fó—/şüˆ„R%¥4..Ò‰°¶¢L›Öµ[÷tùPp_‰ ­ Ë(u4zÛXàÜ³áÈgÇâï¯%Şå*Re¶&ÒqäBk‡;©!â')¤Ï]$àm™x=Æ—aº<!cjº’2ç‡½ƒºLÛB˜"ª¤0áüt~wwÂùÎºaÜ¡ö>ô~vSîxIT!át>©•İü3iÚÊşğÈ¹.¬•ĞTª¡¿ìˆÂ¼yÀ ¨.‹¼„*.72<_¤rïj-ÍèR™Êg2¥+YYú˜ ª£TùQ»Ñeº"X«É,HÓcØ{û^FşIØ/N/‰N ‡3jEZ¥ÕÈÇ|à’rB»ìçê&`È
+Üñm~é ÜÒ—!ÈÆñ›rø‡£Æî£ı,8ÓØ”û-}S—p×­×¹\2“°4r9{šçõ®Ã[À²Ô{mä®7$2]ª"ZÉ\Û†ûËsQe“ËPkeÂ\É-{i™å–é°7ÓWÌƒû½ÆÕ¸ß¿"‡¶aë°›ëHäyš`-äì8\ì~b¢£*9ÉGœ!ùnüŞ£ÇüæÚ<ô²¢ãiÌ³N¾Ã¯h†*áı¨Ñ ¸ Ù	İu+#ƒñS·à›ú Ã
+Ğ%=¶¨¦ÛBÂÖZWĞş‡t{bÊ×ˆà»‡ç‹ #*ÌuŸ5´…iÄĞ©a3ø°`S‹m$FàsT[¯Ñwõ>‹ßt]Â9İ]- ³Ñ9Íï¢àßŞ6äåö±ØYçÓÒğ¡&ô@.&ôP˜Yíd”MCkÁÚ$…åÆ÷¯?ÎÜu1Ş 1ÂÙïEakb6LôjŞY7ºËÅ~]ã„,wîîO…âüğÍ›(¼"lñbáÛÚ6ßGÖœê=A}«F¬œü+­"™åEÕ‡`»§E(—ãºÅ…à}=l®ğ‰ÇÇˆ«I+:ûèTrz&£FQÅêii'®+-m¤t¡Ã\¯Ññ§‰’#˜m´â5v©³G©0°
+ß2×IÂwM×Ã6§Zwqn¼k9#ø7i4“©œNhçÆ´4<ZöÎ½‘×¹Æ$†¡üê¶ËÆ+]º õ}.aäŒóYÜØQ®ÎÀÕ;®oÈêÁU1^úß‘½/­Ã#üëPş¦ıáÃcİ=rıû¦fOf·ÈPä"Ø+ûˆzÈ6}´«÷··%ÇôÈ7
+üÅ˜ğ÷Ú¢¢ı'a¾®;©î'»i
+qÈ8Fsiá;¯!Áı°¶ÀèrÃ½n&˜´âæÖø§Ìc9ö’üî€Ì¥Ãg .ùÃ»¾ğQÏáÙv½AuAãòâRÓêåêÆû^´›«„Íœë{ÄéázŞ¡½á|£•oV4 Q|ñW}p»ĞÅrÁ}îÖşÙ~õ8D-±ò;;!¹ôreª{—ötŒ»sÓ=DÔ!î¸/éw>,u”{X÷¨ım¨?Gù÷7›ãü¬------  END FILE  ------
+./.git/objects/35/b7d3dc3bc67f39bdcdfaad55a8e801f29cc407
+------ BEGIN FILE ------
+x+)JMU02¶`040031QrutñuÕËMa¨­(_t÷…Rx„ÂäİYkFŞó•71 …øø‚ÊäÄäŒÔøx†$Ù«Ç§}*/{|ÓüÚ'Ísó'¾8rjTAeAQ~Vjr‰^I~nCÖÛ]Kç?wôúª¡.ü!"úõEˆyÅ™yÙ™yéñi¥y)Åz©ééº™yiùó¾ï°¯XòHa‡‹Í,v¹Ó‡´=7cÑÀpxéı§75R'›]8ÿS+ûw1‡¬¨!D]IjqI1Ã„Ğ+¿.Ş	ı*8WíA„×JeOÎ  Ñe(------  END FILE  ------
+./.git/objects/40/486dfa9a11a7951582d02c64f939a60ceb8fc9
+------ BEGIN FILE ------
+x½:mlGvË‰¢ø!~I$E-)JõAQ_-+²d)íZJRÉ	*Ùa(îJ¢C‘Ê’r,zY¸»–WøºQ µ(|:¤(T ?ŒşJk›_ÅÒ`‘Å‡BmÑ2Èü'}3»+’²¤½CWË73oŞ¼÷æÍ›7oÖ^K¦×Èc#ÄÏ[[õ<÷Ô‹›ÎAüjÈO«Tù†TÄÇ„îÄ5L5ıX±BĞ
+ªù}%¢eîSJKéà§ßSS-P¤z+”F©n‚Ò,Õ-¸Ş†é­P·Ix;”©î„Ò@µcš¨»Dü†nEI¹WT”‡ê¤¼{Jª‹"
+	úöT+jÊ1İT ğ~ª`7Õ‹aÃ>€¡½æ•&ªŸ€z?e8¸§\iV4A+)‚¢ÕtİL©h¥úËğA|?ñYÑPÊ%ıB‘£#A©ˆÅå#ñc2h „
+~ßœª	Võ@™ ò*VK5Û„Ë&Jùc‚%æ‰'@úüÄ'Oly]ñ–VóZŸcæ‰¢òöòzVI©r°¤¬>””:×P…êù–—ú`ÑòVÁp+ÛÌÌ"Ù·§óFÖH5uÈÂX`5j0ÀkNÁñ'Fks-‘ki&DwOyOYãÁšràhqU\9^«˜ë´ĞÕ(óÖÂ6İEZ´²-ëJ¶‰µÔz´Ğ×0ù¶F
+qT]¿•µ¢H.ÛÆZ£™µˆZP-§®ƒ2œŠ·ƒÖ¬õml»z­'´j§Zó¬“UƒÆ^VÍ:kí¯'²¶üˆzS­O`½>Ãõ v¶¯œ‹uÁ
+arF	Ü]§XÙUoeÖÅÚY'wëkßÅú/¢¿ê½œ	â„NnÖ}-^±—æàa=Ç¾e?EkOƒÖÖ&éºŒl²APÆ=U¾ëıŸ§èİàÃyo<P~¬šİ)Ó‰yt5Ğ‚­¾‡–D¬õç}”9ïg}ÇóÒRhµ}¢¦¬Ÿªòş”÷‰«e£lYˆòÃúwumğìF³¯É¡Z¥=ÙJÙOôÈ²ºaT <Í6	¾]7úÚû=ù^¶—íAñ"dƒu; %s	¤<¸OÔØN94¡q ¥Ğl'Õ^ÓxÇy®r	úyÙ.–dıl7 :öND6ñğ¿Xİc;¥+ 
+>ü	«e²qä‡r¤buåş!ßÇöQîš~ù´=uíş.lè‚ò²ıT×'êOÕ'y6Ğ’'{s%@úäØ†ëC[İÿ©2?HuC½Âz ~ã5-ÑÀ‡º§†ÍC»·®¸ëÚª0uqŠ
+‡ö³ƒÔ ”ƒl—CìşÚü;ÌhÙ F1íKÀuK¸î:\DÂEj¸zÛ°#'móğşc=5Ìj¨È8-?C'&~«ƒCv$öWZ‚Ğ“ğÄcYz#Í$èÌ$y#‘É®R‰xöö IÇâ›ä‡‰ìæ$&C¤÷k¨LÅ¶èà$™É2ƒk±d,G}ëÉt,{¢w+Ên&w£q(™ÄÚN6‘NAÛfä$?İ$Ş’‘pdœ\O3äx™Hei†ÎdÕÈëq5“1Ùè.cAMTÇÂ'ÉåM&¤STŒ!Qÿ0î wÓ;ä½‘H‘Y&?‘Ú‹œ’;[Û™-°Ñ<˜gÍY¬õ‰ÜñğĞ 8áÛ·%EDMëÌ\N§“˜SÍªo42:1H^M’˜ÙñDÈ|õ‚sé•>sôH†DNŒ—Xå¥r¥2`0r‰ŞÎ’¢X¬¹Ag3d,EÒ÷`îd ô¸ˆèŞˆËdXºH@bÀG²qÉ>Û±İ-:•Æ¨;;™,ªş?˜jhô72ÕDãèS%š†¢·Ó™D–LdÈÀh„LÒ™“&mSO7!·Ò]oBIBòÚìf,°Èt*¹’ì¸¾“İaè†½oÆRh{şf®w-u¶ZšÓ=èÜ yîÿ;Õ,X{¼£`‹ )^ßIÑÈ›€IöV°N˜avƒr-–¡ÅYŸ ’0°8[ŠÜ¦™­X
+´Mî’Ù4öÇp$‚w|,™$EC‰¼2dßN*›HmÄ)Ù¤ØÈ N“älBIàµur™Ù¡¥p'ÅÂ]÷Hˆ>Óà"	Ø2}ĞõKÑ„õCSÅV ÓëbÀÄÂ¤µLíl‰ñ–„K¯¦?$ab»²ê0·Lbk'	aB¸b™ŞŞ®Å»4³–ÎĞ§ë½Í kØ·$D§­¶Š­%é0ùèÆ|˜ s£I24øÌiLÅ²1IÅßÑµõŠ¼ğ‘„#Í
+’•`M@
+ß`eP³6ú¥#Gğ6P±.ŒA¼ŠrÀB§öÖÎ$èÆ‡Ò‰x‰Xœuü x¬;9%ãŞï= Äñ[ip©¨´¡i
+ô8å,Ã¤rè7
+‹ğ>&ÏDA’â™EúûûûÉ7ÅH	6‰34lŠ\ÛEŞœúı’›ˆJgÏ©œE²zş7n.¼I.İ\ gß|óÆµ×æ'ÉÀ:ÎâÖQ>†¥PÓ 	$Ô³_@!¶dı°s³áTqyùXDJËçI.aÇgÃ{§Ø;·Æ6YŒ×ßêĞÄ
+¿o|÷z–¸mÉ+îöŠÆé‘òaÛñ"¤ÔÈ¡”áˆ oË ë I¾¸17yëf†f2·®§™š|;–ù`‡ÎİÊ$R(¸²“¢n-‰õ!ÔÈÈ=Ñu©…w2d4áíİú)´{âé­íéÜ ÄB$ŒJ[N%ÓŠd¦¡"S¯€6/€gß}ÕŸŠ™G¡Ç¡cÔ7@A0(·cĞ•@P×!œ ‘<|µ¢oFP£í"Ø°eOÄŞ»"FØ®$T>&È®-y« ˆZÖK)şXùĞ ¶T2m@ö¯ğÃƒî`ú\#”AŸkÀÈÜ?ÜÇÔ»ˆ“dç%¿K%UéÊ^Ëş’ØÈîÿ>ÆÃOWqB×Z»cQ¶.ëÜù‡ßÃ±R|¿wïıƒ1±ëÌ8€8¤Ô(N
+ºã (èkğ¹¦@ä\gœ*<ºS£ğÑHFÑõ1&çD,N‰¹ êø;û{E1n41öÆuÆ‚fa«‚ıÔè)càª7Q*Çè—®-şÎµÅ×É+7ç—È¥¹«¯Íß¼ñÙuNNòñìBúW+ƒ¶ãğB¡¡T‘Q*weè·òQ˜oÏE€A¾Ït!@"àS’dN55y¡ sÊ©ó¹frŞ$¡¼KB©š‰äÚõKbRbõÖv’†ü²‹œ{Y&¬5MÊ,¤şP‡‚²–šcÛÛp7špvÅË)èk×)¡¥î:%håÛ‘`•—³î ¸¿'©ÌXºôLĞ×ò&A#å>‚	“Õ¡ED$R}O°ÄwÒ1İŠA¶T4³™XÏ
+¹áôECĞÊÙ ĞuŠke¢ÙÍDFä&ha/Fqô4§“TCj.˜Sô‡ƒì¹Û±%´ÕøÈ¹„à¬³Q½ ¼YJ‘e–°ÔÁ(e!Qq÷6YŠ9QXÓ(h(´ÉØšHA/	%|‚‡èİXŸ¸Òzœİˆx"²'üMhÂ³šğT…f*±¾Ë¬©õ´ Ø[¢p‹‚ôG…+ *Š*Fyòbš$%ëK)¸R"E#ÊÌ(,Jşw>p„ö³[f¸¢4"ã‡úˆêš’Ğš9“·ÚZ^ãâ4~ŞKrZ7¯ñsš~¾·ÓvW›‰¶18u÷s Ê–ÑŠeôÁõçöoüÊé)­”}g_•¸£høÃBËsoè`ögéCw¹sêseÙsùó·Ê+œ¶ƒ¯ïh+{æ
+zŞÓ{à*{Æ
+dğT	µn˜wúª„ªuƒ¢Š·:Š;'÷M§÷ã¡¿H~ğ¬÷<×{ïòï_ØûıCëáÍ¿q=¥Ê#—Ë]sÅ«¼ÍYÒ‹‹÷7Ë¶0ª>Zü¶ª'†8m·vV	Vˆ°0Ç;]¥sï®ò&'ç>Ç™ĞËÛHÎ?ÆYÇ¹óKÜò­ÊùÛœ½|°Ÿ˜­/s¶ ¼üùùJğÆIîÖ·ªÓ;z¹8Çµ‡Ë¶a~ö-n)ÎÍPœmìğjÙöê·0ÍöÜ‡×”—*ÎKÊ§ıp8–;_«@KëâıNÛõ)kÔE0 UÁw_,Ìón/×5QqŸ+ÜàÛìĞa²rÎ~Î„^Ş:TÃ_:Æ9ÆoqsËÜøMî•²cµâX-ªw†æÊÃ…EŞÔ¹¯xfòq&ï ^«¹¨+,.–ReÃ ªşt‘Npo)[6øÁaÎĞ½?_6„8CØ¼U¢Ywƒz»~>õçS‡êÃµr÷…J÷Î@ò¾‰/}ù.<â®­p“«Üí÷Ê¾XÅî¼É·?ûÌÔÃ™zx³µx­h,9ÿxÙ<êŒ|Ï+ECi¹lö[ÕvßÑÏ»<UÚ¡Ïqèúª«Ó§3U	 õê8:J=ï^ÿÊá.ÍíëöfËpÅ”Çb—+şÉ§³eÏtÅ3]X€™9ÃTÅ1Vxôror”,t¿pŸï{ûów¸¾·k¯¹‡3÷ğ–öÒÈGî¢›ï[ıû¥/œwë—·¸¾ÕÚkî¦^™İ]š¯À|ç™‚œ)ÈûŞy:õ…ºrqó½süâåèä½xueÇìš~š­tÍ?2›Š;|‡wßş³Îb3oí(Í~4YœäGŞçVcÀã×ælaŞî.Å>Z)®ğ#Ûÿ¼ú.¥Ë«ë•Õund»öbJPÒŞñÜà(²CàKÃÀ3Ã ßîá^Şíç#|hš÷GøğÕªI;d¬ ¾&´­¦_# MØ]û—Zï3­·”+kû+Ú~NÛ`¯:oÓ¼â+m+g|½¬½ZÑ^å´WyW¨J¸u$…ë¼öeÅì/Ì¢ÚÅŠ9X˜ıÊ`áÚüÅ À[K€eCwÅĞ	ÅŞŸ.<\(,@tÙg+ñ*áh¦ ŠZ¾³gŸŞ‹,•;#œë•ã·¨á]¯”6÷w+Ş‘äLi“^¨x'9×Œø50?×?[ñ].y_ˆëŸ¬ø.JÕ+ßëhéö©Rû~o¥#ÄÙ^­ĞÄàPÓĞä=İœíbU%wóá‰†vUEX: tÙü0Ú2ÁÛ<ûªıT™/ÛÆ!ÔY!Vş`ô¯Ìöâæ#ÓcSşªC`ÿ:#gLŞ/kç*Ú9N;÷¼ÅÅ©]8K´Q8©hThÂßqÚ.]­®Í„Ôbš‹2\]pÂ›³]ŞS})¬}ËHƒ–gÍ\2c$ÌƒYÀ,ÅîÂS¦IÌúÚÈÿxë©÷'ÿş×—^˜æà“õ¨“¥Sè+»ÈòÁ[3BÓú<,‰ø½¡ù*Kf73è$4/3±»tRê]œ9ºØ#ôO—L€îrè¦qç"ÜëşMu|µL ìŸ"s
+f÷B‚2*qNüíwß}—„6ñO¨vˆÀ/„šÅ¡1D‰Ç¿‹jqPºœî@şå®òè‰üÙ ßƒšH¿	µ'¢Ì0ÂÂÿ² ˜P¦ÀŒ!0Àç „´xFø‚¼¸¸¸Œ/ÉË€EI ZT”ÔÁ¢Z³…Dj{Ò)œ:A~––ïê´Ğ*ç¹Q”y	ír.S—ìŠ=Ò×I9ÃÿÄ!Æ)tÇŸØÄ‹'ºÁŠ—eíÔVšÚIÒÓÌ]Àá\…„…Í¡PÀ–3Ûx³…oµ `Dx{o²ğsÕzG¥pCr¾§!Ô†Bî™ªƒS¡-d‡æâ}¼ÕYÕ5éàÌ@ÀHØÎÀ{¿z‰Ó¿Œï•ù8@®É rE}€áëôé”ém€oAô €ş_Ï'®xÅİÌ©UøşãêäÔ˜i»‹owW›Tm0=Ñê(fª*¥Í §Twªƒ½¹J x°Põ­Î’
+h€ş˜¦×_ÆÛêhìuü¡Şm#' Ní©"aw©S°#
+Ğiú€ §Tm„%Ä™aYzÁ¢¼ÍÎ[¼¼gœÌó¼’[Õª·4M ø5®¡¿jLE¨]°´8Rı$hâ¨------  END FILE  ------
+./.git/objects/40/c33b1904fe5d80a7426f4dd0907ad4f269ffde
+------ BEGIN FILE ------
+x+)JMU°0`040031QrutñuÕËMa¨­(_t÷…Rx„ÂäİYkFŞó•‡**ÎÌËÎÌKw+ÍK)Ö+¨dHúÃµibíùo›––\Ê:³J|M]Ğ< UÊ##------  END FILE  ------
+./.git/objects/49/4a23e07bddc616f1233c041d10c5b84b80452d
+------ BEGIN FILE ------
+xKÊÉOR025cXÎËËÅ «´ü2ôc˜ ŒÏB@Æt††Æ†\Æ(FF†¦`Mæ—Œ@	MÆ[Å™yÙ™yéñi¥y)ÅñÅ™¹¥9‰%™ùy~šL·¸Ü"f ú•ŸAæşòr¶Š	-N-*ñÊ/JOUK,.,M­Ššå4*&b®.ˆS“ØŸ™—Y¯WPù‹Ã&7?¥4'Õ®ˆh4ÈUÅ²@â3##ãƒØPP cPJÔ------  END FILE  ------
+./.git/objects/5c/e8447ac7b77acb7a6caa05b59bfc02dd3809a8
+------ BEGIN FILE ------
+x}A
+Â0E]÷^ )ˆ@´ŠˆVZ\¶™†ÑtÌTìí­n¤Šnşæ½ÿ—Ö•ãÉl:ÊÓùr—ªFG¾óWwÆJ”¸ÆFøBl nY‡€˜@ùîƒjZ{rüÅ×.9l×ñf¿Ê†İ7/²c¾H%wù¥hôÈ¹êÀöÓÂ?Wœ‹7´/I0HH	ƒSıŞXaï------  END FILE  ------
+./.git/objects/62/1dd5c796f27776e3d937d6f229ce9f91e8c4d4
+------ BEGIN FILE ------
+x+)JMU0³`040031Q(ÎÌËÎÌKO+ÍK)/ÎÌ-ÍI,ÉÌÏÓK.¨,ÉÈÏÓ564Ô+¨Lf¿Ë!óùæWWÏÛûÏRø¬}¯ô ıV)------  END FILE  ------
+./.git/objects/62/fc0ab2917dcff6b2a574d26accaa17ac7e529e
+------ BEGIN FILE ------
+xµZmoÛ8¾Ïù„İÂvš¤¶Û´]_½@7ín{×tƒM‹; ŠE'ÚÊ’!Éi ÿı’)Ñn¶Í©@#“3ÃyŸ!Å‹$»£ÑOO_ü#’sQÄéç8½æ«4*‚"^¬’°Œ³´¿#ğÌÂR^fy,‹=ş]”a^kæÓñp|h.²´¼šÔP²Z,‹Õ¢˜~ÈR©†–áz!Ó2£¿VEI¯öì|U®rÌ@$/VÄA0»
+ÓKiCñÉ:ˆÓRæ²(§ó•&Ÿ®OÓÑX­x-ó‹¬´3˜° N§!ØD¼‹ò,ŠgåùáìJ|‰Ë+N:¸az£§—†Ù›ˆ¢ÌÕ*ja¦3š›'YX6fë¶„@ÃenfqÑòàò`O†OÅ<ËÅÓ‡Âh¡âïv‡_k#íM2/>¯$,šÈ4
+sAF|Ìb­Ä…¼ŒSQæáŒÜá@Q2fœˆ×PÏÉ¬Şú„½'}°§>?×Œ(N-µõ>fYR@&kŒ$ë³‰Ÿq8„d• âÖÒ^ï(K£l#öhôÑ°¯Iİê¿Ç2L(LœÊe)Ô²Ì”¸”e!ÂTÈ¯]< ÿ$¸ßgŒWW`høH9Óúñøôÿ_UûãRÕ¡‹íU”RM$—Y—".ÄƒñP$²hªPéÆ†;Â)ri«P¯Ğ'¯-¯ÂRyÈÒd=ĞzÜı?ªÏwé5¥¿=ÛÏ<şçUsÏ…!ÿµJ%yˆ”ˆ­µ˜Ië^!.ÂB*©‘»ì W‚U®‹ÄRæ‹0·ÉZ”ûãÁpÈ&‰PŠR´
+Ñ_¥eœT¸áe§F¥&ß˜$1B½à»¹àÌ©ÒNòkÎ{Ùçg¸¦r„L?Æƒ]İìG¢²D6Wx1mË:O ¢R¯ø6û" ØÚ°Ùt­‘H=p"™-—uîÑÙÛÏ÷2iÄ­@‘Y„9t^$ò@üŞò/1ÔMEFäURÇQX†šÅ?Ôpâ™ÿ@ÑB­›ˆ%¤£ª ‹l‚uÈzĞ2Ø¬±[%‚’#¼,Ziù®§Ö†¼³u±Å4¥F¾$›ÊåÓU9Ü•yvkRø‹.è€–øğÔ25©O9n #|–$4×‚ºf‰Îîî®8QÕ:™åá‰‹5y797æUQVhêÿ®=^Ê
+DÕDEÿı§ãqúéX¼:9yÿîÍë‰xğ„JÂ&êvêFÃY©Áş157I­!jƒw¹[S‰iS„8eÇ…³qlsÛÁŞQ…EtÀ¡C¿ÄsaÊ1edj¬j¬f¦âF­pc"«ãjcú€l"[Rs›Ø6`&Ê’tÅQ¶„.«ŞR™‘fÈ-™X¬JÌpÌ¢óDWª´eÁO÷k}Xx9,’çJiÀ@Ô3TÔlœFò+açÔnöëü¥[F²[W¼–h91ò=%“Ù*Ï‘¬&Jç9´ÌjJõ\¨aÑ~ßêÃÄ¾Ä#{õx(FcŒ*2”C‚â*—´>=w!óø1èT4+DËĞPŒğÈ#f_-¢ÔE@]âîÕr	ogıà¯©!Nb&Q¶­–Á¨†¬óÚ3‰$éºe!„À@PgœÅÎÅÏbˆ¾,RC&uñp“±õ zb*5Ê® G1tICÃAÅ=áš§øhZ‰nëg<GWrö™.¯‹,=zçøòRæT•ª*^)ÆI*gVtiùÿpD$÷Ê’hÿçT~!'dn»B.FØQ¹CÀ|‘âsŠª*¿†3t.µ+*·+leĞ¾™ÖBõ_hD8U«ìB+Û¬™=W@r)†>uJ!à;˜J¨JCpÅ²“ ±´‚BàmIm[Cé}Û±÷Ú7 hŞBôÌ°xŞ&OBBıN›f$1^nk¬çJFèôÀxMwbèì›²ù×cÏõóî›ÜTÎ¢˜UÿÛRyü Vö›*Úk­1°CæÉ@¼E0'Uìx]Ìg©Š;Ó,Ã8Â¢7,¤r§	í„ıŞxK9Œ7²¦`ŠU^ÖùªömÓéüâsVá,šáRs@Ñ¬!-EßôA#©"UÇ¸€˜µîîpß6Ú}_„ [<¥’4´ìŒ"úx9˜¥ s Ó'EÅzFdÎ°ıîÓåùØÃò'bO÷¨ÊàÔ“ı©Éxå¥¶ùmÀ°ÈšË\^SÁOå%Ç®±P›ãÚPÄTW¼Š"3E½÷
+ªÏQA>"rc{ÔÅ
+5ÇåÁn»®Ò#äß‚e©ßvÕ
+FªåèŠ§ñ^ŸßU‹ÿ¸š`¦-U rÛ¦seO ŸØC¹q«³Á¬…¯ñ›Üßò&²—yàÕEĞ´¤m®6f¥5Cß€P"«´nk±l#ü²Š“Hw´uå\—Ãéò›ÏjNù AVÃ´pOoCbéB(lµ5`Õ˜»ƒìAp}Œ]ºh#›>t¤Ÿ]q8°eÕhäûö·Áu˜ÀülÚîÖŒˆ#c'©¾¯
+®=1v=KÇŒŒ¤Ú ¦>(›1z%øDïkU“¥{+¤w4Êéz€V?Š‹eR­ò¼@/lr¾CAˆdF!±5\élÂAAr‹ô7šº×§7‘™oÙºßhŠ“ƒñü¶½…—‰µ¨7ÓŞmQ£*u^p^}½ğÀZÙQJ×d/mgÒòM¯ªˆ¬ĞÚ'ÈŠ˜R˜ç,âÆ€ÖD7³ì;lh8X½ÃP…ëØ^NoxE6%İƒfŒv6ä6P÷~ ü|F=È=£x>f@ç61ÃT[`p(éub¢äY¿[Ç«\œÚËÔ2–ˆ¶ı°wkf¼ÎMÀßËŒÇåÕR¶ÇÛÜĞ»L
+ë8ÈíŠwøÊ—-$í	±Œâ(í™]ám#¿d4ÀGª”µş¬c“Z†EQ×(šQÅ‚ÊÏ™] ÎpL€ÏL}·"†9ÀäRß²±>ÁÔyŞ­@Œmr9…Uª÷À¨–Ğän>Åt½Å›ŒPç¼ã|Ş* Ñğ`lö`ot4†>©ú­,QaÔÒ°]±¿/Nèø§ãÅ*Á):K¶c	Ö#uÈ³ô;¦§ï>üûİ‡ßÄ¯Ÿ>¼>§Goß¼şôşèã@÷È|\ä(ü™v°³ëL;»Ï­j[q:Ïh«Şà½^“L¾Fb¨ÁÏTWãV}:b³AÔ;µ5.œanÖ·û7‹ÉpİvÜÌ©ÅÜwy&Ftû‚3.›kúåú¾Ë>a’;ã\\Î;´‰eú<jçÆœi¶ÏÀÉÅŞÑÁ9#¶ñàí^¼V`•·ôtÅ1ŸÕÍ›UDT5¯–Ç,76 •š„;åÁÕ‘QgõwsĞ€NKÂG¹ZIêªƒĞüwğ]§¦Nùªw>y9ŞŠmĞÉË·¢­~¢0ï¼–K|ğÖ¦`È_Â#Ú¨“—£ám×uF¢„=%çRİÍp¸b[¹ÆÁ>RµäBè;(µİ‘¨Vâc¿ÙÁ¿G,]×8w¥ëbùèº6½+]«m`ÈFÎZ¯u«îº ß.–	ø)Æ;hgª»${¢ÃÉ¤8@.ÓT}Tl&­J­Íƒoşûêø	òÓé«ßŞø`´€OCƒ@La ş§AĞ™(¹@äkH,R¨è]kÒ½½§Ëm Î*-»õ×Ô^}Ã­JÖı4»9VBãã5ê}¿k@"40ñúÜÈºÌ±Ÿ_V„®ÔĞ‹^ƒ°IzL¼1·½÷ÄŞQ’!âîƒ£'‡÷£°ÓğMÚ}p4¦Ï–u~—kÓİƒå¶rõ¼roË³š‡œ¯'¢w„O_Ç¦R¦|;«!êwxÕó-
+óq¶ÁçøVÓ³Ãßd*úøi]W0ªz+Ã¤¼ºëm;/?ô1¯erì<»“Á˜5İ(tÅ‡ÕâBætDå:Ì5VRefîLÒ÷®Ñxhö{ûU×À‚O+WK¼ájœ¾G7“5¢“oÍáÂÑuíÍ«Q¸½÷Î‘5¨‡];’ĞØ7™š×ö¶©˜‚_õÙ`·ºş³ó­ ßR¹_Æ©j³éZ,¿«®Ñˆtrè­<íLà“ëPİÛî¥±E«@äÕqé¤R‚¥Ó)!ÛİÀ¸èéÀÜ†ûÂ»¬²õ{0©§mTYT\şÊ÷s©ş°Œ;bÕa”²ä–‹ZuÃÇÜõ9¬:æŠàWí6Wg\çnè­+Ø+ÜzÅGºúæ³ºÛ†òJ[SsÃï±ªí5bØm½jôz7Q÷jS˜û´:e×W2¬KÕd2ëÒÈôYo²ÉÔ¼°VëyO$M=c¬-V›n™kP1˜¹2bİĞ&‰êÎzÚN µÎÍmÂìüÔò·------  END FILE  ------
+./.git/objects/6a/edba2889a59d53e7414af5282713f0585bebd1
+------ BEGIN FILE ------
+xM±Â0D™óQfˆ(lğŒU„ÒÖ€!MBì€ú÷$-£Ïïì»Î…NîûUÛetÃ†&bHğÊ˜€äQ¶Š€sä‡F­¥úÜœ2b1u¶‚
+û‡êyw­¢)< g#¼a&Ñ?Ñß6×ìRâ‰0øºÙêFo•€ú„‘êyáåÌKÂ1;Ë!I[sª	RõÄ|KtS>×à:NÄ=^Â|’Œ¨J´|_JÖ‰J¥/;d^W------  END FILE  ------
+./.git/objects/8b/137891791fe96927ad78e64b0aad7bded08bdc
+------ BEGIN FILE ------
+xKÊÉOR0dà ­û------  END FILE  ------
+./.git/objects/8d/571ffe5068357c5980f03bdace16d4d2b26c77
+------ BEGIN FILE ------
+x=ËA
+€  ÀÎ¾b?Xtòu	º¯i!ê
+«ú}QĞ}ÆÄl`Pc7»Š+ö›ãâ3iå$LNCñ<ıÑÈñ%©ÄÚRB¾4¬Ÿ‚W='µˆ53 Y¨Œ{p,nû×%Ÿ------  END FILE  ------
+./.git/objects/90/55d4fad011dc55f5119d26e0584aa923490950
+------ BEGIN FILE ------
+x+)JMU°0g01 …øø‚ÊäÄäŒÔøx†ı×¶‹Ûñ'üùşgÆû§ŸoÕ440031Q(I-.‰/ÎÌËÎÌKO+ÍK)Ö+¨dĞ¿k°ƒ3âwL©È9ÿïwS‰ Åì&]------  END FILE  ------
+./.git/objects/94/ad17b9daf2f9efe67f266c291681e95ac5314d
+------ BEGIN FILE ------
+x+)JMU040c040031QˆÏÌË,‰×K.¨,ÉÈÏÓ564Ô+¨LfğôR~P}÷˜ØGeY£;¼\u¡zŠ3sKsK2óó0t9xäşš%¸|ªhÓ”Ÿ–Ëx^÷Ÿ ’)R------  END FILE  ------
+./.git/objects/9e/f7b83f78a4e220b8443c9a070c1ecbc22b49b3
+------ BEGIN FILE ------
+x+)JMU043a040031Qğv×õôsógè—ÿaZÙğÁúÖ9±+—6å”CÕû‡9»ë•T”0Ä¼p©:¾½êtUÎ*Ö­³ÿ0İµà\U–’Zš—’š—\Ÿ“™—]Vß-\1±Rşe¦úÚŠgŞ\k«ï]è¾U_’_Ÿ“Z–šV¸XÑkÒò£G”ÕæK}Êµ&PÌ¸d! ³¹C------  END FILE  ------
+./.git/objects/a3/214a92a7c5c423269f1af5950aac51163374a1
+------ BEGIN FILE ------
+xKÊÉOR04a(ÎÌËÎÌKO+ÍK)æ U»¡------  END FILE  ------
+./.git/objects/b6/d9d7c9c40bb680b265b5f2df10a434529a5db1
+------ BEGIN FILE ------
+xå[]lWv’#şÌPÔ¿eÉv<eÅ”cÙ’å¿ø7›¬½Y¤B6‰·ÕAédÊ©¡ìHKb‰"¼E‚Õ[Äyğ¢‰+#êû—ûÜ¾P¨D¶X´n_”&yÉS¿sïÌğÎH´İ5Šèhxxî¹çş_Şóİs¯¦óÅiclbüÔ„ò×ííš‚çG&¯ı¨GQş…îv˜¯VÁ|¨0eJa!Î‡¦Âü;² Î„CÊBÛT4$bbS1ÄDòñ…ÄTÂ‘iSdj^_HN%CŠ©Í·»°¶÷”»|ê
+”©‹¾§Lu°h'‹ƒv±h7Ó@{˜ÚËÂo)éä’…dZÉ´Kö¢;W¸+Ìef—
+Ì]\Ö®r¥ßUÁUŒÙ¢eø4 ¿°”Ï–rÅÂh«íÍ¥‚q3Wºö’a,.SFÚ#ªìd:Ôˆ½jÎä²y°;[¥ŸñZ¦Ÿ>_uƒ ?Ñ—,ÂTÖö‘:B‹¢+/¿i––¬‚‘5rÊÛ˜)..ÅY£tÍ4f²%s®håLÛÈçì’±d›ÌÈxœùnva1o6âo£’—Ğs(Ï;ÿU0Š2÷ùsş?øüï/¤Õ†ZÈ.˜Øt6Ÿ-Ì˜Ş…b¡t-¿œ™Á·•›^¢^iD²‹Ö=ÅJ"ƒ¯(“o_å¥«WlÓ²¯~¿hÍ™Æ³ö—Ì•«Nó©Ø«o‰Q8Lû*ï{N·O£c:k›™f«¬”Ñ‹=RU65¥oïFÿ¡ƒ=ı›‰¶„¶©‰Ä’ÑM%Öµh*Í„@Ü'†÷ñ?`öRWB%)¾DqÎ3ïÎo¥¬Ü…Î§Ks–©Ÿµİ"ñTÂ¥˜Ë+J9ìOW‰”‘î:Ï·¢–ÕÕ½§”hêÏÓà‹–ÕÙ‹‘şlø®Š2ğqââ%ï¢(ó^yş_ÊÅğåM-çOÉ«­h—åOáÕ¬uŠBˆÅYâ)ëÓ»}}‚½dùõ¼ZõPvÂ—cS3âïw¦=cCşüZÖ0 ‡jLÿH]AWÚX’µ—Ûr!Š–úÜñP_+tW^úKõ‡ş,Ä”wC•HEe
+Ö†Ôä#ÖG0ÑD½t/ÚĞš¿†f—²V)³lf­†.xş›nh…¥…gíF§û3ÏJ¦……¢»aZÓEÛ¼ú6|î\:´rôÀÁÅåci[û‰Ãçâ¦íƒô=–¶ÓZÅ8'¤ÇÓv#’7(r[Ê—QQV˜Ò#rŒÈñ•TÖÆêQâ¤¤‹Ë'ÓI‹¦~C¥¥®g¦¹Hœµ‡„ÚE±êfĞª.,ù|Æ2­™âÂbÖ2IDg¦—rùR®`7¢ù"4ìÆÎŒ}­¸”g\53k—Ígøz—ÈØÙY4|Ñj¤^æUÁ2÷]Ë*ZÄB¶”1ß]ÄšÈÍB:Æ—$k/ªb=GõÑ©@Ñˆq90!"‹rà”M?`C<VŠ2yET–zßXBí’É2¨iÓÊgá²Aû >öO0âUe£=U½ôÛö¿íéÿå¹;{×{Æê=cX7zû6z6ÛèìÛl¥¢_* _©^ú¦SIvÜºñ³3ïŸ©©Æ­3·‡è8¼ëªñP5êœGCÄ‰¡UOOH>8æÉ¶Df­RŞºH)	R$»u& ä=•ÛÃL¤‘¢ PñxÁ	RˆDBó2è#ø3óCÌİ•?ÀÄñ'óùLõ›Ö6€!O%tMaÑ¿
+UÂåĞ¼gº*‘°RøÍÌM¸¬^ç&¬ÒVn³ÿÎ·è4O¬ÜÃ'í áñ¥ğŒHpYÆ¢LvÚyæ=³ã¯ÌS«e>°ˆÛf¹½-æ ©0-Ú¡úX¦9w”é,Y:wì)î˜?'w;î0>mb”H5ÇÔ7¾qŒoÆ7QKã«a|5Vôr¢¬;ã›,'íóµRß$Æ·“´ƒãËºqäş–¶¹€F®‹u?cÙñ§,; ‡²»}=Õœ5š?ÇZº_‹õ8³¦õ²¾r»3kRO1kRşœü!gÖ$1c´ŠÎÚaòw,Åìíâ"¶0yó†™7®›Ë¶1l,šDí_Rañşe¾°ïG-ÚhXØÖ)—,ÂÕ!Óó´4TÜZ“á±®¤ÎxÅ±ôÆYaæa« ãàX~!ãˆ€F©ŠZå  7˜iÕÚG?Od?‘!8-pÀéI^…ód--ÂH­,a¾F*¿´°hŒÉZ×M«Ñ™](.Jf.íLg£o1»¼`B4s-[˜3]ÅAy;ãs[	\ã¶ò„Û$0N“&\G4îke£xÁœ!óÉPóph¸AUÂ'2Aä„¯á§DÃO9 È"KoS"•²±^ ğA"/I!rˆÈa"£ éR‚øä¨u±2H9a¡Dã$æÈIÀ•±£Öy’Ÿ¨“Ó—c2À9)NÛd´ã~	Ô3ÀQOq©´¸„­úÌ5s!›ÁtÎ›ÖëHCµ²	ZU~ßâônq6SJ,şuG,•¨^ÚìU’Gjú(½ê…ûÃ¿>D_‡îúÛÃ¿>òû‡èˆåïCõBİå!©€]ç1N¼>*‚‰ô$÷Fœ¼„Š$h*’³½ØK"
+•_ÄŠ”^-…¾œJÖ÷øÍ¨¢w­î®kÏİşq]ÛW}e3ÀÙ%5µo³[Ù7ôq¼¦Ü‰ß‰ÿJûX[ÓwßÑè#Äò÷¡:RwyGH*`×İ¡âå$Òw{Â­9{OÍK{'âÉDRIĞTŠ%GCó’@¼(Á£B]§.näT²ÌlÅ~´8ÑúÕûmq/°¨„b/ËãM9œ´^:O9€˜à¬ğ¶ÌÛ9+X¢¢ú4	82RnsÜÑrîŒµ’·}…kÂ³¥L+G:tÒß‚:’Oiù|y{5/ysw†\îÈ¤®hh ›ôg¬×ê§®OË¨O;K=e}z·ïŸà¨•mÛ+A=”j¡pkµĞ
+ nölœ[Ô:0Ç[hµùÑëø(Îİ:1ÖÉºÊ1õÅKıîo³Nîur™ò§À£ş|úº½BßQ|T8’ºşz–~…4²¡o‘gÇp\µ@!cGrùËo¼I¡ñßUÿæ ü‘pâÂ',¼;K‘Æ¹óÆØ¨“j²h8¸É~Ñ(¹w›YÙ›ğœŒò\¾#|ÂFv¹Å‚ip”h8sÚD¼Üšóm	cr(Ç±ÛJT([»Ğ`®"!Ëm€–ë^ÚpÁãÄ=O ^€•’óiA‰sàP•ğS!GB¡íFì’%ğhœÃ2J/ JÖE"/ùHC…Ãê(§ã+’·jãâ‰Ét;wX5ñš5IÉ© 	³à‡pMÌ–hb6ë2%ü.y—N„&j0æ .:éoÇ|¡ã6­›.ğ2òÚÇ‘DxøİÉ‘É..æs€ªpYŒTÔ
+ûG`p¥†·u3ƒíÙêfjb0pÚBcıàv7n×qàêVzûWoüâÌ/ášøàäê™u}o]ß‹ÀÚ)ON®Zß?Qß?@òıtÎ«ëêÄCu¢¹ürH+¢„D”|pÒ“mˆ[¥üKøº|™K‚Ç§\…¯Ë—RxCp%Q<Hã½Ÿ›"	<%t¤œíşfAQ ò+$¨ƒS·GåÒeımù­h‰æ#GK› î¡W.”ûÃfpXoJ”ÅXì³ø]`ŸO=üY˜%šØˆi/Ëõ¦6a–l†[¥¡ÃÖŞÔã¶—XŠuÈøkxP<å€ıpìET¶¾”Bxò¡ ÊV™Ü†¶y•§é«ÄX¤"‹¯ ®’€O)Vxf*Z¹­¬9O/ë@x;}õòP<J:^é/EË>€F:™÷¬å]ÔîS·ú
+?ÖòÆÓ³¤r+ıVÇZr
+¯­Sp¯Ğ¶iÊßëyÊZ÷úêàÕ~Zød?ÅG<@gÛ—ĞC{ZhE­€w‹õ~å&ÉúØrÒ™‘íO1#Ûı-ğ‡œc*òtêøÄğ‰ã“¨hüØªÒ¢©sœğˆ‚9Ş‹›ĞÁz²K8m¡	bí BÀªwü>¶µ“dôû³‰ÀH)MŒñˆOCæó¯ 7;ï@)×©åœ]AÁàøĞÂ­[iß…c‹còâ‡X@i ŒFTS5bóÙBH-ú½ücÌ.à9ãàâØVlñ5Õ¬«5¢¢NÂCäGé”€S¤—€ã~3Ü°ş”Â1ÈWe½J!9„hœ;Œ¬·!¶Ş¤8î#rÈQî;òaq_hÂ¦UÈCœğc˜Ã¿/“-0ê'º|àøå,šÓøØ'9Ùè¼ıÎZ[m÷h­ãHõ{ßD•®ôv¤k`£ÇõuÄ»pøò5‘êkğuì¼z?ûl=up­«:´öZ=u¢zy#Õï—W/¡w×zö×õ¡š:TŒ:ôPªsÉº`Ô!0BîDq	t<ÊAÚĞ»WO×õ=ğË|²ãcúú¼díæç}÷~
+æÎ;{Ö~º¾ïB}÷û@sßÏ;/ç÷²órğÂä(è{<—xAh
+É';<Ù§tçÉù¬İä#	¼|>ïJNõö9µE<^D	Æ£BeGßmW’§ùDæ1øã>f•ÿ¤nŞ[•ƒ@*!Î7->‹3.ë0œ½„KŞ™|+¸ÊAgjtY‚%>ÓüÈÄ—d¹e9]‘‘ıÛÉÒËş;¿ıZÏRÜûÒAÚµÍ^ËÁ]°l“šZÃ:?
+;»`œçH»`éºŠ¯†^®OÜ÷Àf¨øDÉçÄz›ı~èûÿÙ¬‡Î€VŞ[}£`Îa«vÃ4²l~É.Ña‡‘Ïâ–…ó¬¸ælñpi¬y‰Ëİ¶Ïæ‹E‹çEWÉ€‘-+¦U4æFÍÑ‘B±4bÌX&nšYÉ5®Z¢ñœ¿(,0yÜdûÎšw~Ó´ïÛ˜ö÷À¦Ùœ-V£—¨šHÜƒp/´Ò0ãØ˜ßk{jßÊwL`¨ùŞ~Ò:ƒ¨•¡‘‘ãqR„. vÒºéec>8H(¤ãÒÎ°¤´©÷Ûá´ØÅãæJ¶d[9¨6bÂØ.sã*vötæ"›ÙãÖ÷!ÙnŸ~–Jw 3[{(ÃŠ¦ÁepGoCŸ¡«‰Âyc-"×›”ó?aY«*ßhJ²óıs·÷®ëéº®¾º1<R}õV×{—kÉç×Õı_ì:°–¸¢öÂKµAlÅûŸ¦«$â6Éî#²Mí ›ÚA6µ#ºÙI§-]ñ8ìôÁõƒÃNÜ`õ2ÀôÔzÔõášzxm?HM^Ûÿ@Ç¡Šó>T×]Ş’
+ØuãÄë8Q!E\Û/B"x/;Y]/w¡/§
+$}®õŒÔu]©¹Bü‘+tÎ#¨^y¨^©s†bÅËuÀ¯ó(GAÇÉi:Á#N¬H‚¨frÎ	”½üErAÊrğ1îcLÖÿq—À7í3İoà¸ñ’¥¼¥–åòZÅB/eÈÆO6Œşm7îsâæd9êlYcå˜ı¡ÏäĞ–?0Š1lXÉ(FƒF‘uÊÛæ1Æ–­¨³Ö4góØÔyA3‹M]§¯¶MÍÀ]@Öå˜Ú8ëf=å¸³]K”è0ßy|9y‡Á-ş–íZ/Ìl¬eQôdÛ«'¡½¥'û±'£eOôĞ“}¾öÿ/öäSÎã¨ÑX?.ôh¸ĞP
+ç× îv’v°÷[ô@`ëßB+x±eÀ™qI6ÈvI‚'Ï¸'9hÆiÜé¬ f÷Êˆ¼²L±aÑf®Ñ—…l'¿LwZ,Üïœã÷ZFÌÙY\· Ç>`òZ+`ò'èeL~3-;H¾:Ù5»„Ë™Ø™J5t¶©A)ŸºVâøhsÏı ]p„(’ß‡ñ9+àwà÷c&±Ysšn¶X´áX#ÈâëÈÕÁ!ÏöøÅš§®É!ÇCZoiü®ƒ€«Áõ$, “FÊí~ÇÆ¶²”½M¤D„_.y%§Â„5Fq¯¹L¤H„# Vş‚	ƒä¶º7wJÙëÀ?bdŠ\ÕÍÎ”ÄeY‹ ÏÏñ±'àdü‰?şì0îœ^3kÏOÔúW'¹w¡‰†ÆeüóDŸBíÅóõÔ…mœ
+nÄ;kêà­“«ì/°ù%ïCu°îòBB
+àÖİ¡á½4·àşwÒ
+Ià)­2OIä	*¿ˆº^=„¾œÊÓßØ±«¦îBıÌ:qâ}¨îª»¼¸u7BhxAD		UØI»Eà)­š’ÈT~+t½z}9•§¿¡÷®şàı³·“uıÀl]?XK·®_ÚTBm6ôó›|×ôK`ÿ3J^àò&ù†Ôşù°PkŠ9'Rñ¾$µ¯‰ˆÇ‘@I^m•×ôó_R‘\¹™!Wl\3–g/Ê8$*Õ,¢É’?>È‘eº¯Ë`›1“É4âîÅz~õ¬1>ÎQá¤ÿš²Ì›®ß5¨sdbÓDWÚ1ì´è™Ä	)÷]¶Ûò¿j‰ûÿ±ÙÜ»´è
+×å1Z&^'BG“Ü7Èw8üwÎÿ#‰×—{¿Ÿ](²¥¼yŞªB™¼:ö¿ƒ`HB¡Í°R7"I%ªbmØöO¯ò¿eWÍÿ~¡´WùnU…Õ”qùÅÑf8şŞs›áD÷«@¾Œ(áNW`h¡}›ŠGB‡6œê
+ßT<r°;t1´©Ht¤/ôCH$zt0„™¹•ğ¾ø/ NûÔ------  END FILE  ------
+./.git/objects/bf/d6b7173e0f631010fcf7fc98efc858cbe7b529
+------ BEGIN FILE ------
+x+)JMU07e040031Q(I-.‰/ÎÌËÎÌKO+ÍK)ÖK.¨,ÉÈÏÓ564Ô2
+t-ôLôô
+*“¶İ¼~ò÷¶†M©[?İXb4+v# ²Ù :------  END FILE  ------
+./.git/objects/c3/a5dfe5d928659336d0cff92a6bfb73081d1531
+------ BEGIN FILE ------
+x+)JMU04´`040031QˆÏÌË,‰×+¨dxm`¹èßšƒÌÚ3ov´¤~Wûºö•¸‰ UT&'&g¤ÆÇ3LY+¾óÖ§ŸïŸÕ«åhŠ5¾Œ:jè5¬83·4'±$3?d\Ò®MkÏÛ´´äRÖ™Uâkê‚æ u%5è------  END FILE  ------
+./.git/objects/e7/acccfd35afdfcc291c158108cd5b8187e4c388
+------ BEGIN FILE ------
+x¥MN!D]sŠ>€~‡!1ÆµpßÍ':3|B£‰§ã\Uå-*¯b=Â ƒ¹áFÆm>™ÍŸMØRL19‡+­Reb´Ò‹+6:²½C«WmM^5&‰Y£P/!oN!i‡(pğkmğ\Û…àûÇ oxøü+o“®‹
+O—Ë~ëñÊÛœóa…;é¥“NY¦ÎL‰\1¾ã”éÜFäÑè°ÃíûoæÒú¼WÇ™K=©s?¼ßaæ------  END FILE  ------
+./.git/objects/eb/3039a2feacc1032b99d9888465f726f5adea17
+------ BEGIN FILE ------
+xKÊÉOR0±dH+ÊÏUĞ+ÎÌ-ÍI,ÉÌÏSÈÌ-È/*Q(ÎÌËÎÌKO+ÍK)GÈs U¢o------  END FILE  ------
+./.git/objects/f5/94a75a428243f82ad0af1931a269fb51ae25aa
+------ BEGIN FILE ------
+x¥ANÃ0 9ûû¢µ³½Bœy@ïw]Œ’¸·Ry=–x·ÑF“Û¶ÕÎÇ§~¨a¦Å2RQ/S 7AÆ„Š›¹QsM‡îH–ˆb²‹§Â*9Ç\²d7
+>L¬½5éÖ?Úïí¸(œÓ÷×MàåşŸÃÖŞfËo—-Õõ9·íl fš‚e8a@4ÃÙ®ÿÌ˜$u¯½¦®ñµC©«š_®CTD------  END FILE  ------
+./.git/objects/pack/pack-9853005997c2a9d0041648bd00433b41ba417e5c.idx
+------ BEGIN FILE ------
+ÿtOc                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                M¸H¡µOÑ	ÈÏÍÂşUspQ}xuŸrİè"WX “»j­ÁYŞM¨[J‡úÃ¬N“ß½&bô¡X:}ÔÚKÆ³ñã"ĞÄK.     I  ˜S Y—Â©ĞH½ C;AºA~\3LI4ïr¼«ü|!é¹té------  END FILE  ------
+./.git/objects/pack/pack-9853005997c2a9d0041648bd00433b41ba417e5c.pack
+------ BEGIN FILE ------
+PACK      Ÿ>xœu“¹£VEs¾âåÔ˜Uc—YÄ*$!eOìˆ}“àë­ñ¤v‡§ê·»Ï<¦)@÷d‘ )˜¡˜A1›ŠL’=šçiRÈXDqƒ`‚¡e.ºTİ˜§<%²S~®h–tÿÅÊ¹ûÒ¿ó•õq×ü(ÈŠ"Ëp4~$±/mÊyNG —óqy‚Ÿm7¦}½ııMËóbyŸOe~üù ğtœİ‘ÂKpø—c ïI‹eI’IòeßìÂ<l”@¡—…»µ$IG$øÒÖòË0{€çğ¦¸~…–uÂÀ!Y3:˜{ë4NbPÑæÑG¤¹)è"×ƒdYB«tn‰Üµk§Ÿ¶öÖä—/³•Èİé­Õ[m»g2'Ô³2İá;¼õ¨ß¹¡ßíå.°jh§.%\Èñ°)Ô²(ƒN³³M!tÖ÷¹{`™„š©ÑËõà™Ï„L2ü:ÏıÚÕ–ˆ~Î¥¶[{Äw˜;š?÷è;ÜzÃ½lTóÜ¥_â`Š„f3ˆ(¾—UùŒº†‘›~$Á6W0A™(zÁ¯VUv:¶«g	—Á1´M'Ì\ŠàõÍÚ÷E)›’2U¥´Î'‰nËùw“ãCQ¿_Õ·éàxñyÛGÂE¿\ÓU5²ıÊiLycûıá™BİÀ^ë4mÅ~‰Û´lœë>wÚ¦­ÜÅßWï|š‰DKÈ0 ¨«æ)­;æˆ|­}iê¤î‰¥jÕ«İ 4*)D„¡Éäé|y¾ïRs +öEòáğ–¢ğ”¨ıĞW•¨o—7î¼£1®º¡
+ÍãGÁ@ëw´ŸMeçòE*†jEìNúW¸ÄpŠ»D9g
+Tg<(eÙµ”Ó£3·ñ;ÔX¾«on-ŸŒ­¶ÑRNÚõ\§#Áİê‹ÿy¾ÍrŒøŞ¾rN¼÷é#L]fğ­šxªÍÜ¼a@uO]¹ÁÑ?ÜªíR’®ç`àÏ¥	-ì·Gıo#0£-çÕà·xÿ ÀÅ<s¥xœ340031QrutñuÕËMa¨­(_t÷…Rx„ÂäİYkFŞó• İB÷ºxœSVÎÌËÎÌK×u+ÍK)ærT(¨,ÉÈÏS(N.Ê,(Q(ÉW()JLÎVÈ­T(†¨TH« V¡˜S Y—Â©ĞH½ C;AºA~\------  END FILE  ------
+./.git/objects/pack/pack-9853005997c2a9d0041648bd00433b41ba417e5c.rev
+------ BEGIN FILE ------
+RIDX                ˜S Y—Â©ĞH½ C;AºA~\#Û¹O%1²ÄÚªZº{JÃ&e------  END FILE  ------
+./.git/packed-refs
+------ BEGIN FILE ------
+# pack-refs with: peeled fully-peeled sorted 
+4db80248a1b54f9ed109c8cfcdc2fe55739e7051 refs/remotes/origin/main
+------  END FILE  ------
+./.git/refs/heads/feat/persist-snapshot-io
+------ BEGIN FILE ------
+e7acccfd35afdfcc291c158108cd5b8187e4c388
+------  END FILE  ------
+./.git/refs/heads/main
+------ BEGIN FILE ------
+e7acccfd35afdfcc291c158108cd5b8187e4c388
+------  END FILE  ------
+./.git/refs/remotes/origin/HEAD
+------ BEGIN FILE ------
+ref: refs/remotes/origin/main
+------  END FILE  ------
+./.git/refs/remotes/origin/main
+------ BEGIN FILE ------
+e7acccfd35afdfcc291c158108cd5b8187e4c388
+------  END FILE  ------
+./.gitignore
+------ BEGIN FILE ------
+# Personal snapshot history
+data/
+*.jsonl
+------  END FILE  ------
+./.pytest_cache/.gitignore
+------ BEGIN FILE ------
+# Created by pytest automatically.
+*
+------  END FILE  ------
+./.pytest_cache/CACHEDIR.TAG
+------ BEGIN FILE ------
+Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag created by pytest.
+# For information about cache directory tags, see:
+#	https://bford.info/cachedir/spec.html
+------  END FILE  ------
+./.pytest_cache/README.md
+------ BEGIN FILE ------
+# pytest cache directory #
+
+This directory contains data from the pytest's cache plugin,
+which provides the `--lf` and `--ff` options, as well as the `cache` fixture.
+
+**Do not** commit this to version control.
+
+See [the docs](https://docs.pytest.org/en/stable/how-to/cache.html) for more information.
+------  END FILE  ------
+./.pytest_cache/v/cache/lastfailed
+------ BEGIN FILE ------
+{}------  END FILE  ------
+./.pytest_cache/v/cache/nodeids
+------ BEGIN FILE ------
+[
+  "tests/test_persistence.py::test_save_and_load_roundtrip",
+  "tests/test_sinking_funds.py::test_contribution_change_takes_effect_on_exact_month",
+  "tests/test_sinking_funds.py::test_lumpsum_marker_and_balance_change",
+  "tests/test_sinking_funds.py::test_monthly_interest_application",
+  "tests/test_sinking_funds.py::test_negative_payment_adjustment_does_not_trigger_withdrawal",
+  "tests/test_sinking_funds.py::test_output_schema_stable",
+  "tests/test_sinking_funds.py::test_returns_requested_number_of_months"
+]------  END FILE  ------
+./data/snapshots.jsonl
+------ BEGIN FILE ------
+{"year": 2025, "month": 6, "category": "Tools", "balance": 10.0}
+{"year": 2025, "month": 6, "category": "Demo", "balance": 1.0}
+{"year": 2025, "month": 7, "category": "Demo", "balance": 1.0}
+------  END FILE  ------
+./project_dump.txt
+------ BEGIN FILE ------
+./pyproject.toml
+------ BEGIN FILE ------
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sinking-funds"
+version = "0.1.0"
+description = "Sinking funds simulator and tracker"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+------  END FILE  ------
+./README.md
+------ BEGIN FILE ------
+# Sinking-Funds
+A python script to track my sinking funds
+------  END FILE  ------
+./sinking_funds/persistence.py
+------ BEGIN FILE ------
+"""
+sinking_funds/persistence.py
+------------------------------------------------------
+Lightweight, appendâ€‘only storage for monthâ€‘end snapshots.
+
+* Each snapshot row is written as one JSON object per line (JSONâ€‘Lines).
+* Default path: data/snapshots.jsonl  (folder created on first use).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import List
+
+SNAPSHOT_DIR = Path("data")
+SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.jsonl"
+
+
+@dataclass
+class Snapshot:
+    year: int
+    month: int
+    category: str
+    balance: float
+
+
+def _ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def save_snapshot(rows: List[Snapshot], file_path: Path | None = None) -> None:
+    """
+    Append a list of Snapshot rows to disk (JSONâ€‘Lines).
+    """
+    fp = Path(file_path) if file_path else SNAPSHOT_FILE
+    _ensure_parent(fp)
+    with fp.open("a", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(asdict(row)) + "\n")
+
+
+def load_snapshots(file_path: Path | None = None) -> List[Snapshot]:
+    """
+    Load all snapshots; returns [] if file is missing.
+    """
+    fp = Path(file_path) if file_path else SNAPSHOT_FILE
+    if not fp.exists():
+        return []
+    with fp.open(encoding="utf-8") as f:
+        return [Snapshot(**json.loads(line)) for line in f]
+------  END FILE  ------
+./sinking_funds/simulation.py
+------ BEGIN FILE ------
+"""
+sinking_funds/simulation.py
+Core engine for sinkingâ€‘fund projections.
+Now writes monthâ€‘end snapshots via persistence.save_snapshot().
+"""
+
+from pathlib import Path
+from typing import List, Dict, Any
+
+from .persistence import Snapshot, save_snapshot
+
+
+def sinking_funds_simulation(
+    categories: List[Dict[str, Any]],
+    start_year: int = 2025,
+    start_month: int = 1,
+    lumpsums: Dict[str, Dict[tuple, float]] | None = None,
+    payment_adjustments: Dict[str, Dict[tuple, float]] | None = None,
+    future_contribution_changes: Dict[str, Dict[tuple, float]] | None = None,
+    monthly_interest: bool = True,
+    num_months: int = 12,
+    verbose: bool = True,
+    snapshot_path: str | Path | None = None,
+):
+    # ------------------------------------------------------------------ setup
+    if lumpsums is None:
+        lumpsums = {}
+    if payment_adjustments is None:
+        payment_adjustments = {}
+    if future_contribution_changes is None:
+        future_contribution_changes = {}
+
+    # copy so caller's list is untouched
+    categories = [dict(cat) for cat in categories]
+    month_summaries = []
+
+    # -------------------------------------------------------------- main loop
+    for month_index in range(num_months):
+        current_month_num = ((start_month - 1) + month_index) % 12 + 1
+        year_shift = ((start_month - 1) + month_index) // 12
+        current_year = start_year + year_shift
+
+        # 1) monthly interest
+        if monthly_interest:
+            for cat in categories:
+                if cat["apr"] > 0 and cat["balance"] > 0:
+                    cat["balance"] += cat["balance"] * (cat["apr"] / 12.0)
+
+        # 2) permanent contribution changes
+        contribution_changes_this_month = {}
+        for cat in categories:
+            name = cat["name"]
+            if name in future_contribution_changes and (
+                current_year,
+                current_month_num,
+            ) in future_contribution_changes[name]:
+                old = cat["monthly_contribution"]
+                new = future_contribution_changes[name][
+                    (current_year, current_month_num)
+                ]
+                cat["monthly_contribution"] = new
+                contribution_changes_this_month[name] = (old, new)
+
+        # 3) deposits + oneâ€‘off payment adjustments
+        lumpsum_paid = {cat["name"]: 0.0 for cat in categories}
+        this_month_dep = {}
+        payment_adj_this_month = {}
+        for cat in categories:
+            name = cat["name"]
+            base = cat["monthly_contribution"]
+            adj = payment_adjustments.get(name, {}).get(
+                (current_year, current_month_num), 0.0
+            )
+            deposit = max(base + adj, 0.0)
+            cat["balance"] += deposit
+            this_month_dep[name] = deposit
+            payment_adj_this_month[name] = adj
+
+        # 4) lumpsums
+        for cat in categories:
+            name = cat["name"]
+            lump = lumpsums.get(name, {}).get(
+                (current_year, current_month_num), 0.0
+            )
+            if lump > 0:
+                cat["balance"] += lump
+                lumpsum_paid[name] = lump
+
+        # 5) build month summary (for return / printing)
+        month_data = {
+            "year": current_year,
+            "month_num": current_month_num,
+            "categories": [],
+        }
+
+        for cat in categories:
+            name = cat["name"]
+            adj = payment_adj_this_month[name]
+            pay_marker = (
+                f"*** Payment increased by ${adj:.2f} ***"
+                if adj > 0
+                else f"*** Payment decreased by ${abs(adj):.2f} ***"
+                if adj < 0
+                else ""
+            )
+            lump_marker = (
+                f"*** LUMP SUM APPLIED: ${lumpsum_paid[name]:.2f} ***"
+                if lumpsum_paid[name] > 0
+                else ""
+            )
+            contrib_marker = ""
+            if name in contribution_changes_this_month:
+                old_c, new_c = contribution_changes_this_month[name]
+                diff = new_c - old_c
+                contrib_marker = (
+                    f"*** Monthly contribution increased by ${diff:.2f} ***"
+                    if diff > 0
+                    else f"*** Monthly contribution decreased by ${abs(diff):.2f} ***"
+                    if diff < 0
+                    else ""
+                )
+
+            month_data["categories"].append(
+                {
+                    "name": name,
+                    "apr": cat["apr"],
+                    "balance": round(cat["balance"], 2),
+                    "amount_deposited": round(this_month_dep[name], 2),
+                    "payment_change_marker": pay_marker,
+                    "lumpsum_marker": lump_marker,
+                    "contribution_change_marker": contrib_marker,
+                }
+            )
+
+        # ---- NEW: persist snapshots ------------------------------------
+        snap_rows = [
+            Snapshot(
+                year=current_year,
+                month=current_month_num,
+                category=c["name"],
+                balance=c["balance"],
+            )
+            for c in month_data["categories"]
+        ]
+        save_snapshot(snap_rows, Path(snapshot_path) if snapshot_path else None)
+
+        month_summaries.append(month_data)
+
+    # ---------------------------------------------------------------- print
+    if verbose:
+        print("\nSINKING FUNDS SCHEDULE\n" + "=" * 60)
+        for m in month_summaries:
+            print(f"\n{m['year']}-{m['month_num']:02d}")
+            for cat in m["categories"]:
+                print(
+                    f"  {cat['name']:<18}"
+                    f"Bal: ${cat['balance']:<10}"
+                    + (
+                        f" {cat['payment_change_marker']}"
+                        if cat["payment_change_marker"]
+                        else ""
+                    )
+                    + (f" {cat['lumpsum_marker']}" if cat["lumpsum_marker"] else "")
+                    + (
+                        f" {cat['contribution_change_marker']}"
+                        if cat["contribution_change_marker"]
+                        else ""
+                    )
+                )
+        print("\nSimulation complete.\n")
+
+    return month_summaries
+------  END FILE  ------
+./sinking_funds/__init__.py
+------ BEGIN FILE ------
+"""
+sinking_funds package
+Public API reâ€‘exports.
+"""
+
+from .simulation import sinking_funds_simulation
+from .persistence import Snapshot, save_snapshot, load_snapshots
+
+__all__ = [
+    "sinking_funds_simulation",
+    "Snapshot",
+    "save_snapshot",
+    "load_snapshots",
+]
+------  END FILE  ------
+./sinking_funds/__pycache__/persistence.cpython-311.pyc
+------ BEGIN FILE ------
+§
+    0…Sh³  ã                  ó¬   — d Z ddlmZ ddlZddlmZmZ ddlmZ ddl	m
+Z
+  ed¦  «        Zedz  Ze G d	„ d
+¦  «        ¦   «         Zdd„Zddd„Zddd„ZdS )u$  
+sinking_funds/persistence.py
+------------------------------------------------------
+Lightweight, appendâ€‘only storage for monthâ€‘end snapshots.
+
+* Each snapshot row is written as one JSON object per line (JSONâ€‘Lines).
+* Default path: data/snapshots.jsonl  (folder created on first use).
+é    )ÚannotationsN)Ú	dataclassÚasdict)ÚPath)ÚListÚdatazsnapshots.jsonlc                  ó8   — e Zd ZU ded<   ded<   ded<   ded<   dS )	ÚSnapshotÚintÚyearÚmonthÚstrÚcategoryÚfloatÚbalanceN)Ú__name__Ú
+__module__Ú__qualname__Ú__annotations__© ó    úMC:\Users\Jorge Vasquez\sinkingFund\Sinking-Funds\sinking_funds\persistence.pyr
+   r
+      s4   € € € € € € à€I€IIØ€J€JJØ€M€MMØ€N€NN€N€Nr   r
+   Úpathr   ÚreturnÚNonec                ó>   — | j                              dd¬¦  «         d S )NT)ÚparentsÚexist_ok)ÚparentÚmkdir)r   s    r   Ú_ensure_parentr!      s#   € Ø„K×Ò˜d¨TĞÑ2Ô2Ğ2Ğ2Ğ2r   ÚrowsúList[Snapshot]Ú	file_pathúPath | Nonec           	     ó.  — |rt          |¦  «        nt          }t          |¦  «         |                     dd¬¦  «        5 }| D ]9}|                     t          j        t          |¦  «        ¦  «        dz   ¦  «         Œ:	 ddd¦  «         dS # 1 swxY w Y   dS )u@   
+    Append a list of Snapshot rows to disk (JSONâ€‘Lines).
+    Úaúutf-8©Úencodingú
+N)r   ÚSNAPSHOT_FILEr!   ÚopenÚwriteÚjsonÚdumpsr   )r"   r$   ÚfpÚfÚrows        r   Úsave_snapshotr4   !   sÛ   € ğ &Ğ	8ˆi‰Œˆ­=€Bİ2ÑÔĞØ	Š˜wˆÑ	'Ô	'ğ 4¨1Øğ 	4ğ 	4ˆCØGŠG•D”Jv c™{œ{Ñ+Ô+¨dÑ2Ñ3Ô3Ğ3Ğ3ğ	4ğ4ğ 4ğ 4ñ 4ô 4ğ 4ğ 4ğ 4ğ 4ğ 4ğ 4ğ 4øøøğ 4ğ 4ğ 4ğ 4ğ 4ğ 4s   ¿=B
+Â
+BÂBc                óÖ   — | rt          | ¦  «        nt          }|                     ¦   «         sg S |                     d¬¦  «        5 }d„ |D ¦   «         cddd¦  «         S # 1 swxY w Y   dS )z<
+    Load all snapshots; returns [] if file is missing.
+    r(   r)   c           	     óJ   — g | ] }t          d i t          j        |¦  «        ¤‘Œ!S )r   )r
+   r/   Úloads)Ú.0Úlines     r   ú
+<listcomp>z"load_snapshots.<locals>.<listcomp>4   s0   € Ğ;Ğ;Ğ;°•Ğ,Ğ,4œ: dÑ+Ô+Ğ,Ğ,Ğ;Ğ;Ğ;r   N)r   r,   Úexistsr-   )r$   r1   r2   s      r   Úload_snapshotsr<   ,   s³   € ğ &Ğ	8ˆi‰Œˆ­=€BØ9Š9‰;Œ;ğ Øˆ	Ø	Š˜'ˆÑ	"Ô	"ğ < aØ;Ğ;¸Ğ;Ñ;Ô;ğ<ğ <ğ <ğ <ñ <ô <ğ <ğ <ğ <ğ <ğ <ğ <øøøğ <ğ <ğ <ğ <ğ <ğ <s   ÁAÁA"Á%A")r   r   r   r   )N)r"   r#   r$   r%   r   r   )r$   r%   r   r#   )Ú__doc__Ú
+__future__r   r/   Údataclassesr   r   Úpathlibr   Útypingr   ÚSNAPSHOT_DIRr,   r
+   r!   r4   r<   r   r   r   ú<module>rC      s  ğğğ ğ #Ğ "Ğ "Ğ "Ğ "Ğ "à €€€Ø )Ğ )Ğ )Ğ )Ğ )Ğ )Ğ )Ğ )Ø Ğ Ğ Ğ Ğ Ğ Ø Ğ Ğ Ğ Ğ Ğ àˆtF‰|Œ|€ØĞ0Ñ0€ğ ğğ ğ ğ ğ ñ ô ñ „ğğ3ğ 3ğ 3ğ 3ğ4ğ 4ğ 4ğ 4ğ 4ğ<ğ <ğ <ğ <ğ <ğ <ğ <r   ------  END FILE  ------
+./sinking_funds/__pycache__/simulation.cpython-311.pyc
+------ BEGIN FILE ------
+§
+    ÂŒShP  ã                   ó  — d Z ddlmZ ddlmZmZmZ ddlmZm	Z	 	 	 	 	 	 	 	 	 	 dd
+eee
+ef                  dededee
+eeef         f         dz  dee
+eeef         f         dz  dee
+eeef         f         dz  dededede
+ez  dz  fd„ZdS )u‹   
+sinking_funds/simulation.py
+Core engine for sinkingâ€‘fund projections.
+Now writes monthâ€‘end snapshots via persistence.save_snapshot().
+é    )ÚPath)ÚListÚDictÚAnyé   )ÚSnapshotÚsave_snapshotéé  NTé   Ú
+categoriesÚ
+start_yearÚstart_monthÚlumpsumsÚpayment_adjustmentsÚfuture_contribution_changesÚmonthly_interestÚ
+num_monthsÚverboseÚsnapshot_pathc
+                 ó0  ‡"‡#— |€i }|€i }|€i }d„ | D ¦   «         } g }
+t          |¦  «        D ]±}|dz
+  |z   dz  dz   Š"|dz
+  |z   dz  }||z   Š#|r?| D ]<}|d         dk    r.|d         dk    r"|dxx         |d         |d         dz  z  z  cc<   Œ=i }| D ]>}|d         }||v r0‰#‰"f||         v r$|d	         }||         ‰#‰"f         }||d	<   ||f||<   Œ?d
+„ | D ¦   «         }i }i }| D ]k}|d         }|d	         }|                     |i ¦  «                             ‰#‰"fd¦  «        }t          ||z   d¦  «        }|dxx         |z  cc<   |||<   |||<   Œl| D ]Q}|d         }|                     |i ¦  «                             ‰#‰"fd¦  «        }|dk    r|dxx         |z  cc<   |||<   ŒR‰#‰"g dœ}| D ]æ}|d         }||         }|dk    rd|d›dn|dk     rdt          |¦  «        d›dnd}||         dk    rd||         d›dnd}d}||v r9||         \  }}||z
+  }|dk    rd|d›dn|dk     rdt          |¦  «        d›dnd}|d                              ||d         t          |d         d¦  «        t          ||         d¦  «        |||dœ¦  «         Œçˆ"ˆ#fd„|d         D ¦   «         } t          | |	rt          |	¦  «        nd ¦  «         |
+                     |¦  «         Œ³|rµt          d¦  «         |
+D ]”}!t          d|!d         › d|!d         d›¦  «         |!d         D ]g}t          d|d         d ›d!|d         d"›|d#         rd$|d#         › ndz   |d%         rd$|d%         › ndz   |d&         rd$|d&         › ndz   ¦  «         ŒhŒ•t          d'¦  «         |
+S )(Nc                 ó,   — g | ]}t          |¦  «        ‘ŒS © )Údict©Ú.0Úcats     úLC:\Users\Jorge Vasquez\sinkingFund\Sinking-Funds\sinking_funds\simulation.pyú
+<listcomp>z,sinking_funds_simulation.<locals>.<listcomp>"   s   € Ğ2Ğ2Ğ2 •$s‘)”)Ğ2Ğ2Ğ2ó    r   r   Úaprr   Úbalanceg      (@ÚnameÚmonthly_contributionc                 ó    — i | ]}|d          d“ŒS )r"   ç        r   r   s     r   ú
+<dictcomp>z,sinking_funds_simulation.<locals>.<dictcomp>A   s   € Ğ?Ğ?Ğ?¨S˜˜Fœ SĞ?Ğ?Ğ?r   r%   )ÚyearÚ	month_numr   z*** Payment increased by $z.2fz ***z*** Payment decreased by $Ú z*** LUMP SUM APPLIED: $z'*** Monthly contribution increased by $z'*** Monthly contribution decreased by $r   é   )r"   r    r!   Úamount_depositedÚpayment_change_markerÚlumpsum_markerÚcontribution_change_markerc           	      óN   •— g | ]!}t          ‰‰|d          |d         ¬¦  «        ‘Œ"S )r"   r!   )r'   ÚmonthÚcategoryr!   )r   )r   ÚcÚcurrent_month_numÚcurrent_years     €€r   r   z,sinking_funds_simulation.<locals>.<listcomp>ˆ   sN   ø€ ğ 
+ğ 
+ğ 
+ğ õ Ø!Ø'Ø˜6œØ˜)œğ	ñ ô ğ
+ğ 
+ğ 
+r   zT
+SINKING FUNDS SCHEDULE
+============================================================ú
+r'   ú-r(   Ú02dz  z<18zBal: $z<10r,   ú r-   r.   z
+Simulation complete.
+)	ÚrangeÚgetÚmaxÚabsÚappendÚroundr	   r   Úprint)$r   r   r   r   r   r   r   r   r   r   Úmonth_summariesÚmonth_indexÚ
+year_shiftr   Úcontribution_changes_this_monthr"   ÚoldÚnewÚlumpsum_paidÚthis_month_depÚpayment_adj_this_monthÚbaseÚadjÚdepositÚlumpÚ
+month_dataÚ
+pay_markerÚlump_markerÚcontrib_markerÚold_cÚnew_cÚdiffÚ	snap_rowsÚmr3   r4   s$                                     @@r   Úsinking_funds_simulationrV      s  øø€ ğ ĞØˆØĞ"Ø ĞØ"Ğ*Ø&(Ğ#ğ 3Ğ2 zĞ2Ñ2Ô2€JØ€Oõ ˜ZÑ(Ô(ğ m+ñ m+ˆØ)¨A™o°Ñ<ÀÑBÀQÑFĞØ" Q‘¨+Ñ5¸"Ñ<ˆ
+Ø! JÑ.ˆğ ğ 	KØ!ğ Kğ KØu”: ’>> c¨)¤n°qÒ&8Ğ&8Ø˜	NN”N c¨)¤n¸¸E¼
+ÀTÑ8IÑ&JÑJNN‘Nøğ +-Ğ'Øğ 	Cğ 	CˆCØv”;ˆDØĞ2Ğ2Ğ2ØØ!ğ8ğ -¨TÔ2ğ83ğ 83ğ Ğ0Ô1Ø1°$Ô7Ø!Ğ#4Ğ5ôğ /2Ğ*Ñ+Ø9<¸c¸
+Ğ/°Ñ5øğ @Ğ?°JĞ?Ñ?Ô?ˆØˆØ!#ĞØğ 		/ğ 		/ˆCØv”;ˆDØĞ-Ô.ˆDØ%×)Ò)¨$°Ñ3Ô3×7Ò7ØĞ0Ğ1°3ñô ˆCõ ˜$ ™* cÑ*Ô*ˆGØ	ˆNˆNŒN˜gÑ%ˆNˆN‰NØ#*ˆN˜4Ñ Ø+.Ğ" 4Ñ(Ğ(ğ ğ 	*ğ 	*ˆCØv”;ˆDØ—<’<  bÑ)Ô)×-Ò-ØĞ0Ğ1°3ñô ˆDğ aŠxˆxØI” $Ñ&‘Ø%)˜TÑ"øğ !Ø*Øğ
+ğ 
+ˆ
+ğ ğ %	ğ %	ˆCØv”;ˆDØ(¨Ô.ˆCğ ˜’77ğ ;¨SĞ:Ğ:Ğ:Ğ:Ğ:ğ ˜’77ğ Eµ#°c±(´(ĞDĞDĞDĞDĞDàğ ğ   Ô%¨Ò)Ğ)ğ G¨,°tÔ*<ĞFĞFĞFĞFĞFàğ ğ
+  ˆNØĞ6Ğ6Ğ6Ø>¸tÔD‘uØ˜u‘}ğ ˜a’xxğ M¸dĞLĞLĞLĞLĞLğ ˜a’xxğ WÅ3ÀtÁ9Ä9ĞVĞVĞVĞVĞVàğ ğ |Ô$×+Ò+à Ø˜uœ:İ$ S¨¤^°QÑ7Ô7İ(-¨n¸TÔ.BÀAÑ(FÔ(FØ-7Ø&1Ø2@ğğ ñ
+ô 
+ğ 
+ğ 
+ğ
+ğ 
+ğ 
+ğ 
+ğ 
+ğ   Ô-ğ
+ñ 
+ô 
+ˆ	õ 	i¸Ğ!O¥ mÑ!4Ô!4Ğ!4È4ÑPÔPĞPà×Ò˜zÑ*Ô*Ğ*Ñ*ğ ğ *İĞ5Ñ6Ô6Ğ6Ø ğ 	ğ 	ˆAİĞ7q˜”yĞ7Ğ7 1 [¤>Ğ7Ğ7Ğ7Ñ8Ô8Ğ8Ø˜”ğ ğ İğ2˜˜VœĞ*ğ 2ğ 2Ø  œ^Ğ1ğ2ğ 2ğ Ğ6Ô7ğ Ğ:˜CĞ 7Ô8Ğ:Ğ:Ğ:àñğ 7:Ğ:JÔ6KĞSĞ2˜3Ğ/Ô0Ğ2Ğ2Ğ2ĞQSñUğ Ğ;Ô<ğ Ğ?˜CĞ <Ô=Ğ?Ğ?Ğ?àññô ğ ğ ğõ  	Ğ(Ñ)Ô)Ğ)àĞr   )	r
+   r   NNNTr   TN)Ú__doc__Úpathlibr   Útypingr   r   r   Úpersistencer   r	   ÚstrÚintÚtupleÚfloatÚboolrV   r   r   r   ú<module>r`      sh  ğğğ ğ Ğ Ğ Ğ Ğ Ğ Ø "Ğ "Ğ "Ğ "Ğ "Ğ "Ğ "Ğ "Ğ "Ğ "à 0Ğ 0Ğ 0Ğ 0Ğ 0Ğ 0Ğ 0Ğ 0ğ
+ ØØ59Ø@DØHLØ!ØØØ'+ğ_ğ _ØT˜#˜s˜(”^Ô$ğ_àğ_ğ ğ_ğ 3˜˜U E˜\Ô*Ğ*Ô+¨dÑ2ğ	_ğ
+ ˜c 4¨¨u¨Ô#5Ğ5Ô6¸Ñ=ğ_ğ "& c¨4°°u°Ô+=Ğ&=Ô!>ÀÑ!Eğ_ğ ğ_ğ ğ_ğ ğ_ğ ˜‘: Ñ$ğ_ğ _ğ _ğ _ğ _ğ _r   ------  END FILE  ------
+./sinking_funds/__pycache__/__init__.cpython-311.pyc
+------ BEGIN FILE ------
+§
+    ŸSh  ã                   ó2   — d Z ddlmZ ddlmZmZmZ g d¢ZdS )u0   
+sinking_funds package
+Public API reâ€‘exports.
+é   )Úsinking_funds_simulation)ÚSnapshotÚsave_snapshotÚload_snapshots)r   r   r   r   N)Ú__doc__Ú
+simulationr   Úpersistencer   r   r   Ú__all__© ó    úJC:\Users\Jorge Vasquez\sinkingFund\Sinking-Funds\sinking_funds\__init__.pyú<module>r      sV   ğğğ ğ
+ 1Ğ 0Ğ 0Ğ 0Ğ 0Ğ 0Ø @Ğ @Ğ @Ğ @Ğ @Ğ @Ğ @Ğ @Ğ @Ğ @ğğ ğ €€€r   ------  END FILE  ------
+./sinking_funds.egg-info/dependency_links.txt
+------ BEGIN FILE ------
+
+------  END FILE  ------
+./sinking_funds.egg-info/PKG-INFO
+------ BEGIN FILE ------
+Metadata-Version: 2.4
+Name: sinking-funds
+Version: 0.1.0
+Summary: Sinking funds simulator and tracker
+------  END FILE  ------
+./sinking_funds.egg-info/SOURCES.txt
+------ BEGIN FILE ------
+README.md
+pyproject.toml
+sinking_funds/__init__.py
+sinking_funds/simulation.py
+sinking_funds.egg-info/PKG-INFO
+sinking_funds.egg-info/SOURCES.txt
+sinking_funds.egg-info/dependency_links.txt
+sinking_funds.egg-info/top_level.txt
+tests/test_sinking_funds.py------  END FILE  ------
+./sinking_funds.egg-info/top_level.txt
+------ BEGIN FILE ------
+sinking_funds
+------  END FILE  ------
+./tests/test_persistence.py
+------ BEGIN FILE ------
+from pathlib import Path
+
+from sinking_funds.persistence import Snapshot, save_snapshot, load_snapshots
+
+
+def test_save_and_load_roundtrip(tmp_path):
+    file_ = tmp_path / "snap.jsonl"
+    rows = [
+        Snapshot(year=2025, month=6, category="Tools", balance=48.0),
+        Snapshot(year=2025, month=6, category="Savings", balance=300.0),
+    ]
+    save_snapshot(rows, file_)
+    loaded = load_snapshots(file_)
+    assert loaded == rows
+------  END FILE  ------
+./tests/test_sinking_funds.py
+------ BEGIN FILE ------
+"""
+tests/test_sinking_funds.py
+Unitâ€‘tests for sinking_funds_simulation.sinking_funds_simulation
+Run with:  pytest
+"""
+
+import copy
+from decimal import Decimal
+
+import pytest
+
+# Import the function under test
+from sinking_funds import sinking_funds_simulation
+
+
+# ---------------------------------------------------------------------------
+# Helper fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def base_categories():
+    """Return a minimal copy of the categories list used in the example."""
+    return [
+        {
+            "name": "TestFund",
+            "balance": 100.00,
+            "monthly_contribution": 0.00,
+            "apr": 0.12,                   # 12â€¯% annual nominal, for easy math
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Core regression tests
+# ---------------------------------------------------------------------------
+
+def test_returns_requested_number_of_months(base_categories):
+    months = 6
+    result = sinking_funds_simulation(
+        categories=copy.deepcopy(base_categories),
+        start_year=2025,
+        start_month=1,
+        num_months=months,
+        monthly_interest=False,
+        verbose=False,
+    )
+    assert len(result) == months
+
+
+def test_output_schema_stable(base_categories):
+    """Topâ€‘level keys & perâ€‘category keys should stay the same."""
+    result = sinking_funds_simulation(
+        categories=copy.deepcopy(base_categories),
+        start_year=2025,
+        start_month=1,
+        num_months=1,
+        monthly_interest=False,
+        verbose=False,
+    )[0]  # first (and only) month
+
+    # Topâ€‘level keys
+    assert {"year", "month_num", "categories"} <= result.keys()
+
+    # Perâ€‘category keys
+    cat = result["categories"][0]
+    expected_cat_keys = {
+        "name",
+        "apr",
+        "balance",
+        "amount_deposited",
+        "payment_change_marker",
+        "lumpsum_marker",
+        "contribution_change_marker",
+    }
+    assert expected_cat_keys <= cat.keys()
+
+
+def test_monthly_interest_application(base_categories):
+    """
+    Start balance = 100
+    APR = 12â€¯%
+    Monthly interest = 1â€¯% => 1.00
+    No deposits, no withdrawals.
+    Balance after one month should be 101.00
+    """
+    result = sinking_funds_simulation(
+        categories=copy.deepcopy(base_categories),
+        start_year=2025,
+        start_month=1,
+        num_months=1,
+        monthly_interest=True,
+        verbose=False,
+    )[0]["categories"][0]["balance"]
+
+    assert Decimal(str(result)) == Decimal("101.00")
+
+
+def test_lumpsum_marker_and_balance_change(base_categories):
+    lumpsums = {"TestFund": {(2025, 3): 250.0}}
+
+    # Run three months (Jan, Feb, Mar) so the lumpâ€‘sum hits in monthÂ 3
+    summaries = sinking_funds_simulation(
+        categories=copy.deepcopy(base_categories),
+        start_year=2025,
+        start_month=1,
+        lumpsums=lumpsums,
+        num_months=3,
+        monthly_interest=False,
+        verbose=False,
+    )
+
+    jan_bal = summaries[0]["categories"][0]["balance"]
+    mar_cat = summaries[2]["categories"][0]
+
+    assert mar_cat["lumpsum_marker"]  # nonâ€‘empty
+    assert mar_cat["balance"] == pytest.approx(jan_bal + 250.0)  # interest off
+
+
+def test_negative_payment_adjustment_does_not_trigger_withdrawal(base_categories):
+    """
+    A negative adjustment larger than the monthly contribution should floor
+    the deposit at zero (i.e., *not* create a withdrawal).
+    """
+    cats = copy.deepcopy(base_categories)
+    cats[0]["monthly_contribution"] = 30.0
+
+    payment_adjustments = {"TestFund": {(2025, 1): -100.0}}
+
+    summary = sinking_funds_simulation(
+        categories=cats,
+        start_year=2025,
+        start_month=1,
+        payment_adjustments=payment_adjustments,
+        num_months=1,
+        monthly_interest=False,
+        verbose=False,
+    )[0]["categories"][0]
+
+    assert summary["amount_deposited"] == 0.0
+    assert summary["payment_change_marker"] == "*** Payment decreased by $100.00 ***"
+
+
+def test_contribution_change_takes_effect_on_exact_month(base_categories):
+    """
+    Contribution should switch permanently starting the *effective* month.
+    """
+    cats = copy.deepcopy(base_categories)
+    cats[0]["monthly_contribution"] = 50.0
+
+    future_changes = {"TestFund": {(2025, 2): 150.0}}
+
+    # Jan & Feb
+    summaries = sinking_funds_simulation(
+        categories=cats,
+        start_year=2025,
+        start_month=1,
+        future_contribution_changes=future_changes,
+        num_months=2,
+        monthly_interest=False,
+        verbose=False,
+    )
+
+    jan_dep = summaries[0]["categories"][0]["amount_deposited"]
+    feb_dep = summaries[1]["categories"][0]["amount_deposited"]
+
+    assert jan_dep == 50.0
+    assert feb_dep == 150.0
+    assert summaries[1]["categories"][0]["contribution_change_marker"] \
+        == "*** Monthly contribution increased by $100.00 ***"
+
+------  END FILE  ------
+./tests/__pycache__/test_persistence.cpython-311-pytest-8.4.0.pyc
+------ BEGIN FILE ------
+§
+    …ShÆ  ã                   óF   — d dl Zd dlmc mZ d dlmZ d dlm	Z	m
+Z
+mZ d„ ZdS )é    N)ÚPath)ÚSnapshotÚsave_snapshotÚload_snapshotsc                 ó2  — | dz  }t          dddd¬¦  «        t          dddd¬¦  «        g}t          ||¦  «         t          |¦  «        }||k    }|sÂt          j        d	|fd
+||f¦  «        dt          j        ¦   «         v st          j        |¦  «        rt          j        |¦  «        nddt          j        ¦   «         v st          j        |¦  «        rt          j        |¦  «        nddœz  }dd|iz  }t          t          j
+        |¦  «        ¦  «        ‚d }d S )Nz
+snap.jsonlié  é   ÚToolsg      H@)ÚyearÚmonthÚcategoryÚbalanceÚSavingsg     Àr@)ú==)z%(py0)s == %(py2)sÚloadedÚrows)Úpy0Úpy2zassert %(py4)sÚpy4)r   r   r   Ú
+@pytest_arÚ_call_reprcompareÚ@py_builtinsÚlocalsÚ_should_repr_global_nameÚ	_safereprÚAssertionErrorÚ_format_explanation)Útmp_pathÚfile_r   r   Ú@py_assert1Ú@py_format3Ú@py_format5s          úJC:\Users\Jorge Vasquez\sinkingFund\Sinking-Funds\tests\test_persistence.pyÚtest_save_and_load_roundtripr#      sB  € Ø|Ñ#€Eåd !¨g¸tĞDÑDÔDİd !¨iÀĞGÑGÔGğ€Dõ $˜ÑÔĞİ˜EÑ"Ô"€FØTŠ>ĞĞĞÕÔĞĞĞĞˆ6TĞÑÔĞÕÔÑÔĞĞÕÔˆ6ÑÔĞÕÔˆ6ÑÔĞĞĞÕÔÑÔĞĞÕÔTÑÔĞÕÔTÑÔĞĞĞĞÑĞĞĞĞĞÑĞÕÕÔĞÑÔÑÔĞĞĞĞĞó    )Úbuiltinsr   Ú_pytest.assertion.rewriteÚ	assertionÚrewriter   Úpathlibr   Úsinking_funds.persistencer   r   r   r#   © r$   r"   ú<module>r,      si   ğØ  € € € € € € € € € € € € Ğ Ğ Ğ Ğ Ğ Ğ à MĞ MĞ MĞ MĞ MĞ MĞ MĞ MĞ MĞ Mğğ ğ ğ ğ r$   ------  END FILE  ------
+./tests/__pycache__/test_sinking_funds.cpython-311-pytest-8.4.0.pyc
+------ BEGIN FILE ------
+§
+    Ë*NhX  ã                   ó   — d Z ddlZddlmc mZ ddlZddlm	Z	 ddl
+Z
+ddlmZ e
+j        d„ ¦   «         Zd„ Zd„ Zd„ Zd	„ Zd
+„ Zd„ ZdS )ur   
+tests/test_sinking_funds.py
+Unitâ€‘tests for sinking_funds_simulation.sinking_funds_simulation
+Run with:  pytest
+é    N)ÚDecimal)Úsinking_funds_simulationc                  ó   — dddddœgS )zAReturn a minimal copy of the categories list used in the example.ÚTestFundg      Y@ç        g¸…ëQ¸¾?)ÚnameÚbalanceÚmonthly_contributionÚapr© r   ó    úLC:\Users\Jorge Vasquez\sinkingFund\Sinking-Funds\tests\test_sinking_funds.pyÚbase_categoriesr      s$   € ğ
+ ØØ$(Øğ		
+ğ 	
+ğğ r   c                 óÊ  — d}t          t          j        | ¦  «        dd|dd¬¦  «        }t          |¦  «        }||k    }|st	          j        d|fd||f¦  «        dt          j        ¦   «         v st	          j        t          ¦  «        rt	          j	        t          ¦  «        ndd	t          j        ¦   «         v st	          j        |¦  «        rt	          j	        |¦  «        nd	t	          j	        |¦  «        d
+t          j        ¦   «         v st	          j        |¦  «        rt	          j	        |¦  «        nd
+dœz  }dd|iz  }t          t	          j        |¦  «        ¦  «        ‚d x}}d S )Né   éé  é   F©Ú
+categoriesÚ
+start_yearÚstart_monthÚ
+num_monthsÚmonthly_interestÚverbose©ú==)z0%(py3)s
+{%(py3)s = %(py0)s(%(py1)s)
+} == %(py5)sÚlenÚresultÚmonths)Úpy0Úpy1Úpy3Úpy5zassert %(py7)sÚpy7)r   ÚcopyÚdeepcopyr   Ú
+@pytest_arÚ_call_reprcompareÚ@py_builtinsÚlocalsÚ_should_repr_global_nameÚ	_safereprÚAssertionErrorÚ_format_explanation)r   r   r   Ú@py_assert2Ú@py_assert4Ú@py_format6Ú@py_format8s          r   Ú'test_returns_requested_number_of_monthsr3   %   s{  € Ø€Fİ%İ”= Ñ1Ô1ØØØØØğñ ô €Fõ ˆv‰;Œ;Ğ ˆ;˜&Ò Ğ Ğ Ñ Õ Ô Ğ Ğ Ğ Ğ ˆ;˜&Ğ Ñ Ô Ğ Õ Ô Ñ Ô Ğ Ğ Õ Ô 3Ñ Ô Ğ Õ Ô 3Ñ Ô Ğ Ğ Ğ Õ Ô Ñ Ô Ğ Ğ Õ Ô ˆvÑ Ô Ğ Õ Ô ˆvÑ Ô Ğ Ğ Õ Ô ˆ;Ñ Ô Ğ Õ Ô Ñ Ô Ğ Ğ Õ Ô ˜&Ñ Ô Ğ Õ Ô ˜&Ñ Ô Ğ Ğ Ğ Ğ Ñ Ğ Ğ Ğ Ğ Ğ Ñ Ğ Õ Õ Ô Ğ Ñ Ô Ñ Ô Ğ Ğ Ğ Ğ Ğ Ğ Ğ r   c                 óV  — t          t          j        | ¦  «        ddddd¬¦  «        d         }h d£}|j        } |¦   «         }||k    }|s½t	          j        d|fd||f¦  «        t	          j        |¦  «        d	t          j        ¦   «         v st	          j	        |¦  «        rt	          j        |¦  «        nd	t	          j        |¦  «        t	          j        |¦  «        d
+œz  }dd|iz  }t          t	          j        |¦  «        ¦  «        ‚dx}x}x}}|d         d         }h d£}	|j        }
+ |
+¦   «         }|	|k    }|sèt	          j        d|fd|	|f¦  «        dt          j        ¦   «         v st	          j	        |	¦  «        rt	          j        |	¦  «        nddt          j        ¦   «         v st	          j	        |¦  «        rt	          j        |¦  «        ndt	          j        |
+¦  «        t	          j        |¦  «        dœz  }dd|iz  }t          t	          j        |¦  «        ¦  «        ‚dx}x}
+}dS )u<   Topâ€‘level keys & perâ€‘category keys should stay the same.r   r   Fr   r   >   ÚyearÚ	month_numr   )ú<=)zC%(py1)s <= %(py7)s
+{%(py7)s = %(py5)s
+{%(py5)s = %(py3)s.keys
+}()
+}r   )r!   r"   r#   r$   zassert %(py9)sÚpy9Nr   >   r   r   r	   Úlumpsum_markerÚamount_depositedÚpayment_change_markerÚcontribution_change_marker)zC%(py0)s <= %(py6)s
+{%(py6)s = %(py4)s
+{%(py4)s = %(py2)s.keys
+}()
+}Úexpected_cat_keysÚcat)r    Úpy2Úpy4Úpy6zassert %(py8)sÚpy8)r   r%   r&   Úkeysr'   r(   r,   r)   r*   r+   r-   r.   )r   r   Ú@py_assert0r0   Ú@py_assert6r/   r2   Ú@py_format10r>   r=   Ú@py_assert3Ú@py_assert5Ú@py_assert1Ú@py_format7Ú@py_format9s                  r   Útest_output_schema_stablerL   2   s  € å%İ”= Ñ1Ô1ØØØØØğñ ô ğ ô	€Fğ /Ğ.Ğ.Ğ?°&´+Ğ?°+°+±-´-Ğ?Ğ.°-Ò?Ğ?Ğ?Ğ?Õ?Ô?Ğ?Ğ?Ğ?Ğ?Ğ.°-Ğ?Ñ?Ô?Õ?Ô?Ğ.Ñ?Ô?Ğ?Õ?Ô?Ñ?Ô?Ğ?Ğ?Õ?Ô?°&Ñ?Ô?Ğ?Õ?Ô?°&Ñ?Ô?Ğ?Ğ?Õ?Ô?°+Ñ?Ô?Õ?Ô?°-Ñ?Ô?Ğ?Ğ?Ñ?Ğ?Ğ?Ğ?Ğ?Ğ?Ñ?Ğ?Õ?Õ?Ô?Ğ?Ñ?Ô?Ñ?Ô?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?ğ Ô
+˜qÔ
+!€Cğğ ğ Ğğ !$¤Ğ*  ¡
+¤
+Ğ*Ğ 
+Ò*Ğ*Ğ*Ğ*Õ*Ô*Ğ*Ğ*Ğ*Ğ*Ğ 
+Ğ*Ñ*Ô*Ğ*Õ*Ô*Ñ*Ô*Ğ*Ğ*Õ*Ô*ĞÑ*Ô*Ğ*Õ*Ô*ĞÑ*Ô*Ğ*Ğ*Ğ*Õ*Ô*Ñ*Ô*Ğ*Ğ*Õ*Ô* Ñ*Ô*Ğ*Õ*Ô* Ñ*Ô*Ğ*Ğ*Õ*Ô* Ñ*Ô*Õ*Ô* 
+Ñ*Ô*Ğ*Ğ*Ñ*Ğ*Ğ*Ğ*Ğ*Ğ*Ñ*Ğ*Õ*Õ*Ô*Ğ*Ñ*Ô*Ñ*Ô*Ğ*Ğ*Ğ*Ğ*Ğ*Ğ*Ğ*Ğ*Ğ*r   c                 óX  — t          t          j        | ¦  «        ddddd¬¦  «        d         d         d         d         }t          |¦  «        }t	          |¦  «        }d	}t	          |¦  «        }||k    }|s¨t          j        d
+|fd||f¦  «        dt          j        ¦   «         v st          j	        t          ¦  «        rt          j
+        t          ¦  «        nddt          j        ¦   «         v st          j	        t          ¦  «        rt          j
+        t          ¦  «        nddt          j        ¦   «         v st          j	        |¦  «        rt          j
+        |¦  «        ndt          j
+        |¦  «        t          j
+        |¦  «        dt          j        ¦   «         v st          j	        t          ¦  «        rt          j
+        t          ¦  «        ndt          j
+        |¦  «        t          j
+        |¦  «        dœz  }dd|iz  }t          t          j        |¦  «        ¦  «        ‚dx}x}x}x}}dS )u¡   
+    Start balance = 100
+    APR = 12â€¯%
+    Monthly interest = 1â€¯% => 1.00
+    No deposits, no withdrawals.
+    Balance after one month should be 101.00
+    r   r   TFr   r   r   r	   z101.00r   )zo%(py6)s
+{%(py6)s = %(py0)s(%(py4)s
+{%(py4)s = %(py1)s(%(py2)s)
+})
+} == %(py12)s
+{%(py12)s = %(py8)s(%(py10)s)
+}r   Ústrr   )r    r!   r?   r@   rA   rB   Úpy10Úpy12zassert %(py14)sÚpy14N)r   r%   r&   rN   r   r'   r(   r)   r*   r+   r,   r-   r.   )	r   r   rG   rH   Ú@py_assert9Ú@py_assert11Ú@py_assert7Ú@py_format13Ú@py_format15s	            r   Ú!test_monthly_interest_applicationrW   N   s;  € õ &İ”= Ñ1Ô1ØØØØØğñ ô ğ ô	ğ 
+ôğ ôğ $ô%€Fõ v‘;”;Ğ47;ÑÔĞ4¨8Ğ4¥7¨8Ñ#4Ô#4Ğ4ĞĞ#4Ò4Ğ4Ğ4Ñ4Õ4Ô4Ğ4Ğ4Ğ4Ğ4ĞĞ#4Ğ4Ñ4Ô4Ğ4Õ4Ô4Ñ4Ô4Ğ4Ğ4Õ4Ô47Ñ4Ô4Ğ4Õ4Ô47Ñ4Ô4Ğ4Ğ4Ğ4Õ4Ô4Ñ4Ô4Ğ4Ğ4Õ4Ô4•3Ñ4Ô4Ğ4Õ4Ô4•3Ñ4Ô4Ğ4Ğ4Ğ4Õ4Ô4Ñ4Ô4Ğ4Ğ4Õ4Ô4vÑ4Ô4Ğ4Õ4Ô4vÑ4Ô4Ğ4Ğ4Õ4Ô4;Ñ4Ô4Õ4Ô4ĞÑ4Ô4Ğ4Õ4Ô4Ñ4Ô4Ğ4Ğ4Õ4Ô4¥7Ñ4Ô4Ğ4Õ4Ô4¥7Ñ4Ô4Ğ4Ğ4Õ4Ô4¨8Ñ4Ô4Õ4Ô4Ğ#4Ñ4Ô4Ğ4Ğ4Ñ4Ğ4Ğ4Ğ4Ğ4Ğ4Ñ4Ğ4Õ4Õ4Ô4Ğ4Ñ4Ô4Ñ4Ô4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4Ğ4r   c           	      óğ  — dddii}t          t          j        | ¦  «        dd|ddd¬¦  «        }|d	         d
+         d	         d         }|d         d
+         d	         }|d         }|s:ddt          j        |¦  «        iz  }t          t          j        |¦  «        ¦  «        ‚d }|d         }t          j        }d}||z   }	 ||	¦  «        }
+||
+k    }|st          j	        d|fd||
+f¦  «        t          j        |¦  «        dt          j        ¦   «         v st          j        t          ¦  «        rt          j        t          ¦  «        ndt          j        |¦  «        dt          j        ¦   «         v st          j        |¦  «        rt          j        |¦  «        ndt          j        |¦  «        t          j        |
+¦  «        dœz  }dd|iz  }t          t          j        |¦  «        ¦  «        ‚d x}x}x}x}x}	}
+d S )Nr   )r   é   g     @o@r   r   rY   F)r   r   r   Úlumpsumsr   r   r   r   r   r	   é   r9   zassert %(py1)sr!   r   )zZ%(py1)s == %(py11)s
+{%(py11)s = %(py5)s
+{%(py5)s = %(py3)s.approx
+}((%(py6)s + %(py8)s))
+}ÚpytestÚjan_bal)r!   r"   r#   rA   rB   Úpy11zassert %(py13)sÚpy13)r   r%   r&   r'   r,   r-   r.   r\   Úapproxr(   r)   r*   r+   )r   rZ   Ú	summariesr]   Úmar_catrD   Ú@py_format2r0   rT   rR   Ú@py_assert10r/   Ú@py_format12Ú@py_format14s                 r   Ú&test_lumpsum_marker_and_balance_changerg   b   s7  € Ø˜Y¨Ğ.Ğ/€Hõ )İ”= Ñ1Ô1ØØØØØØğñ ô €Iğ ˜Œl˜<Ô(¨Ô+¨IÔ6€GØ˜Œl˜<Ô(¨Ô+€GàĞ#Ô$Ğ$Ğ$Ğ$Ğ$Ğ$Õ$Ô$Ğ$Ñ$Ô$Ğ$Ñ$Ğ$Õ$Õ$Ô$Ğ$Ñ$Ô$Ñ$Ô$Ğ$Ğ$Ğ$Ø9ÔĞ?¥¤Ğ?¸Ğ?¨w¸©Ğ?  ¨Ñ!?Ô!?Ğ?ĞĞ!?Ò?Ğ?Ğ?Ñ?Õ?Ô?Ğ?Ğ?Ğ?Ğ?ĞĞ!?Ğ?Ñ?Ô?Õ?Ô?ĞÑ?Ô?Ğ?Õ?Ô?Ñ?Ô?Ğ?Ğ?Õ?Ô?¥Ñ?Ô?Ğ?Õ?Ô?¥Ñ?Ô?Ğ?Ğ?Õ?Ô? Ñ?Ô?Ğ?Õ?Ô?Ñ?Ô?Ğ?Ğ?Õ?Ô?¨wÑ?Ô?Ğ?Õ?Ô?¨wÑ?Ô?Ğ?Ğ?Õ?Ô?¸Ñ?Ô?Õ?Ô?Ğ!?Ñ?Ô?Ğ?Ğ?Ñ?Ğ?Ğ?Ğ?Ğ?Ğ?Ñ?Ğ?Õ?Õ?Ô?Ğ?Ñ?Ô?Ñ?Ô?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?Ğ?r   c           	      ó°  — t          j        | ¦  «        }d|d         d<   dddii}t          |dd|dd	d	¬
+¦  «        d         d         d         }|d         }d}||k    }|slt          j        d|fd||f¦  «        t          j        |¦  «        t          j        |¦  «        dœz  }dd|iz  }t          t          j        |¦  «        ¦  «        ‚dx}x}}|d         }d}||k    }|slt          j        d|fd||f¦  «        t          j        |¦  «        t          j        |¦  «        dœz  }dd|iz  }t          t          j        |¦  «        ¦  «        ‚dx}x}}dS )zŒ
+    A negative adjustment larger than the monthly contribution should floor
+    the deposit at zero (i.e., *not* create a withdrawal).
+    g      >@r   r
+   r   )r   r   g      YÀr   r   F)r   r   r   Úpayment_adjustmentsr   r   r   r   r:   r   r   ©z%(py1)s == %(py4)s©r!   r@   úassert %(py6)srA   Nr;   z$*** Payment decreased by $100.00 ***)r%   r&   r   r'   r(   r,   r-   r.   )	r   Úcatsri   ÚsummaryrD   rG   r/   Ú@py_format5rJ   s	            r   Ú<test_negative_payment_adjustment_does_not_trigger_withdrawalrp   w   sÙ  € õ
+ Œ=˜Ñ)Ô)€DØ&*€Dˆ„GĞ"Ñ#à%¨	°6Ğ':Ğ;Ğå&ØØØØ/ØØØğñ ô ğ ô	ğ 
+ôğ ô€Gğ Ğ%Ô&Ğ-¨#Ğ-Ğ&¨#Ò-Ğ-Ğ-Ğ-Õ-Ô-Ğ-Ğ-Ğ-Ğ-Ğ&¨#Ğ-Ñ-Ô-Õ-Ô-Ğ&Ñ-Ô-Õ-Ô-¨#Ñ-Ô-Ğ-Ğ-Ñ-Ğ-Ğ-Ğ-Ğ-Ğ-Ñ-Ğ-Õ-Õ-Ô-Ğ-Ñ-Ô-Ñ-Ô-Ğ-Ğ-Ğ-Ğ-Ğ-Ğ-Ğ-ØĞ*Ô+ĞUĞ/UĞUĞ+Ğ/UÒUĞUĞUĞUÕUÔUĞUĞUĞUĞUĞ+Ğ/UĞUÑUÔUÕUÔUĞ+ÑUÔUÕUÔUĞ/UÑUÔUĞUĞUÑUĞUĞUĞUĞUĞUÑUĞUÕUÕUÔUĞUÑUÔUÑUÔUĞUĞUĞUĞUĞUĞUĞUĞUĞUr   c           	      ó¤  — t          j        | ¦  «        }d|d         d<   dddii}t          |dd|d	d
+d
+¬¦  «        }|d         d         d         d         }|d         d         d         d         }d}||k    }|s—t          j        d|fd||f¦  «        dt          j        ¦   «         v st          j        |¦  «        rt          j        |¦  «        ndt          j        |¦  «        dœz  }dd|iz  }	t          t          j
+        |	¦  «        ¦  «        ‚dx}}d}||k    }|s—t          j        d|fd||f¦  «        dt          j        ¦   «         v st          j        |¦  «        rt          j        |¦  «        ndt          j        |¦  «        dœz  }dd|iz  }	t          t          j
+        |	¦  «        ¦  «        ‚dx}}|d         d         d         d         }
+d}|
+|k    }|slt          j        d|fd|
+|f¦  «        t          j        |
+¦  «        t          j        |¦  «        dœz  }dd|iz  }t          t          j
+        |¦  «        ¦  «        ‚dx}
+x}}dS )zP
+    Contribution should switch permanently starting the *effective* month.
+    g      I@r   r
+   r   )r   r[   g     Àb@r   r   r[   F)r   r   r   Úfuture_contribution_changesr   r   r   r   r:   r   )z%(py0)s == %(py3)sÚjan_dep)r    r"   zassert %(py5)sr#   NÚfeb_depr<   z1*** Monthly contribution increased by $100.00 ***rj   rk   rl   rA   )r%   r&   r   r'   r(   r)   r*   r+   r,   r-   r.   )r   rm   Úfuture_changesra   rs   rt   r/   rI   Ú@py_format4r1   rD   rG   ro   rJ   s                 r   Ú4test_contribution_change_takes_effect_on_exact_monthrw      s4  € õ Œ=˜Ñ)Ô)€DØ&*€Dˆ„GĞ"Ñ#à  9¨eĞ"4Ğ5€Nõ )ØØØØ$2ØØØğñ ô €Iğ ˜Œl˜<Ô(¨Ô+Ğ,>Ô?€GØ˜Œl˜<Ô(¨Ô+Ğ,>Ô?€GàĞˆ7dŠ?ĞĞĞÕÔĞĞĞĞˆ7dĞÑÔĞÕÔÑÔĞĞÕÔˆ7ÑÔĞÕÔˆ7ÑÔĞĞÕÔdÑÔĞĞÑĞĞĞĞĞÑĞÕÕÔĞÑÔÑÔĞĞĞĞĞØĞˆ7eÒĞĞĞÕÔĞĞĞĞˆ7eĞÑÔĞÕÔÑÔĞĞÕÔˆ7ÑÔĞÕÔˆ7ÑÔĞĞÕÔeÑÔĞĞÑĞĞĞĞĞÑĞÕÕÔĞÑÔÑÔĞĞĞĞĞØQŒ<˜Ô% aÔ(Ğ)EÔFğ ?Ø>ğ?ĞFØ>ò?ğ ?ğ ?ğ ?õ ?Ü->ğ?ğ ?ğ ?ğ ?ĞFØ>ğ?ñ ?ô ?õ ?Ü5>ğ Gñ ?ô ?õ ?Ü5>Ğ>ñ?ô ?ğ ?ğ ?ñ ?ğ ?ğ ?ğ ?ğ ?ğ ?ñ ?ğ ?õ ?õ ?Ü+>ğ?ñ ?ô ?ñ ?ô ?ğ ?ğ ?ğ ?ğ ?ğ ?ğ ?ğ ?ğ ?ğ ?r   )Ú__doc__Úbuiltinsr)   Ú_pytest.assertion.rewriteÚ	assertionÚrewriter'   r%   Údecimalr   r\   Úsinking_fundsr   Úfixturer   r3   rL   rW   rg   rp   rw   r   r   r   ú<module>r€      sê   ğğğ ğ € € € € € € € € € € € € €€€€Ø Ğ Ğ Ğ Ğ Ğ à €€€ğ 3Ğ 2Ğ 2Ğ 2Ğ 2Ğ 2ğ „ğ	ğ 	ñ „ğ	ğ 
+!ğ 
+!ğ 
+!ğ+ğ +ğ +ğ85ğ 5ğ 5ğ(@ğ @ğ @ğ*Vğ Vğ Vğ0?ğ ?ğ ?ğ ?ğ ?r   ------  END FILE  ------
+./__pycache__/sinking_funds_simulation.cpython-311.pyc
+------ BEGIN FILE ------
+§
+    xNh0  ã                   ó   — 	 	 	 	 	 	 	 	 d/d„Z edk    r{ddd	dd
+œddddd
+œddddd
+œddddd
+œddddd
+œddddd
+œddddd
+œddddd
+œddddd
+œg	ZdZdddœdd idd id!œZd"d id#d$id"d%id#d&id#d'id#d(id)œZd*d+id*did,œZ e ed d-eeeded¬.¦	  «	        ZdS dS )0éé  é   NTé   c	                 ó8  — |€i }|€i }|€i }d„ | D ¦   «         } g }	t          |¦  «        D ]ƒ}
+|dz
+  |
+z   dz  dz   }|dz
+  |
+z   dz  }||z   }|rA| D ]>}|d         dk    r0|d         dk    r$|d         |d         dz  z  }|dxx         |z  cc<   Œ?i }| D ]>}|d	         }||v r0||f||         v r$|d
+         }||         ||f         }||d
+<   ||f||<   Œ?d„ | D ¦   «         }d„ | D ¦   «         }i }| D ]]}|d	         }|d
+         }d}||v r||                              ||fd¦  «        }||z   }|dk     rd}|dxx         |z  cc<   |||<   |||<   Œ^| D ]S}|d	         }|                     |i ¦  «        }|                     ||fd¦  «        }|dk    r|dxx         |z  cc<   |||<   ŒT||g dœ}| D ]î}|d	         }|d         }t          |d         d¦  «        }t          ||         d¦  «        } ||         }!d}"|!dk    rd|!d›d}"n|!dk     rdt          |!¦  «        d›d}"d}#||         dk    rd||         d›d}#d}$||v r:||         \  }%}&|&|%z
+  }'|'dk    rd|'d›d}$n|'dk     rdt          |'¦  «        d›d}$n	 |d                              |||| |"|#|$dœ¦  «         Œï|	                     |¦  «         Œ…|rét          d¦  «         |	D ]Æ}(|(d         })|(d         }*t          d|)› d|*d›¦  «         t          d ¦  «         |(d         D ]†}+|+d         d!z  d›d"},d#|+d         d›}-d#|+d$         d›}.|+d%         }/|+d&         }#|+d'         }0d(|+d	         d)›d*|,d+›d,|.d+›d-|-d.›}1|/r|1d*|/z   z  }1|#r|1d*|#z   z  }1|0r|1d*|0z   z  }1t          |1¦  «         Œ‡ŒÇt          d/|d0¦  «         |	S )1a®  
+    categories: List[dict], each with:
+        {
+            'name': str,
+            'balance': float,
+            'monthly_contribution': float,
+            'apr': float         # e.g., 0.04 for 4% interest
+        }
+
+    start_year, start_month: The calendar year/month you begin tracking.
+
+    lumpsums: Dict[str, Dict[(year, month), float]]
+      e.g., {
+         'Tools': {
+             (2025, 9): 500.0
+         },
+         'Condo': {
+             (2025, 10): 1000.0
+         }
+      }
+      Means in Sept 2025, Tools gets an extra $500; in Oct 2025, Condo gets $1000, etc.
+
+    payment_adjustments: Dict[str, Dict[(year, month), float]]
+      e.g., {
+         'Tools': {
+             (2025, 9): -20.0
+         },
+         'Condo': {
+             (2025, 10): 50.0
+         }
+      }
+      Means Tools deposit is $20 less in Sept 2025, Condo deposit is $50 more in Oct 2025
+      (for that month only).
+
+    future_contribution_changes: Dict[str, Dict[(year, month), float]]
+      e.g., {
+         'Investment': {
+             (2026, 6): 500.0
+         }
+      }
+      Means that starting in June 2026, the 'Investment' category's base monthly_contribution
+      is changed permanently to $500.00 for all future months (until changed again).
+
+    monthly_interest: bool
+      If True, each category with apr>0.0 earns (apr/12)*balance at the start of each month.
+
+    num_months: int
+      How many months to simulate before stopping.
+
+    verbose: bool
+      If True, prints a summary table. Otherwise just returns the data.
+
+    Returns:
+        month_summaries: list of dict, each entry containing:
+          {
+            'year': int,
+            'month_num': int,
+            'categories': List[{
+                'name': str,
+                'apr': float,
+                'balance': float,
+                'amount_deposited': float,
+                'payment_change_marker': str,       # e.g. "*** Payment increased by $50.00 ***"
+                'lumpsum_marker': str,             # e.g. "*** LUMP SUM APPLIED: $300.00 ***"
+                'contribution_change_marker': str   # e.g. "*** Monthly contribution increased by $100.00 ***"
+            }]
+          }
+        Summaries for each month simulated.
+    Nc                 ó,   — g | ]}t          |¦  «        ‘ŒS © )Údict©Ú.0Úcats     úLC:\Users\Jorge Vasquez\sinkingFund\Sinking-Funds\sinking_funds_simulation.pyú
+<listcomp>z,sinking_funds_simulation.<locals>.<listcomp>Z   s   € Ğ2Ğ2Ğ2 •$s‘)”)Ğ2Ğ2Ğ2ó    r   r   Úapré    Úbalanceg      (@ÚnameÚmonthly_contributionc                 ó    — i | ]}|d          d“ŒS ©r   ç        r   r	   s     r   ú
+<dictcomp>z,sinking_funds_simulation.<locals>.<dictcomp>y   s   € Ğ?Ğ?Ğ?¨S˜˜Fœ SĞ?Ğ?Ğ?r   c                 ó    — i | ]}|d          d“ŒS r   r   r	   s     r   r   z,sinking_funds_simulation.<locals>.<dictcomp>z   s   € ĞEĞEĞE°3˜c &œk¨3ĞEĞEĞEr   r   )ÚyearÚ	month_numÚ
+categoriesé   Ú z*** Payment increased by $z.2fz ***z*** Payment decreased by $z*** LUMP SUM APPLIED: $z'*** Monthly contribution increased by $z'*** Monthly contribution decreased by $r   )r   r   r   Úamount_depositedÚpayment_change_markerÚlumpsum_markerÚcontribution_change_markerzr
+SINKING FUNDS SCHEDULE (by Calendar Month)
+======================================================================r   r   ú
+ú-Ú02dzF----------------------------------------------------------------------éd   ú%ú$r   r   r    r!   z  z<20ú z<8z Dep: z Bal: z<10z
+Simulation complete forzmonths.
+)ÚrangeÚgetÚroundÚabsÚappendÚprint)2r   Ú
+start_yearÚstart_monthÚlumpsumsÚpayment_adjustmentsÚfuture_contribution_changesÚmonthly_interestÚ
+num_monthsÚverboseÚmonth_summariesÚmonth_indexÚcurrent_month_numÚ
+year_shiftÚcurrent_yearr   ÚinterestÚcontribution_changes_this_monthÚcat_nameÚold_contributionÚnew_contributionÚlumpsum_paidÚthis_month_depositÚpayment_adjs_this_monthr   Úbase_contribÚadjÚdeposit_amountÚlumpsum_dict_for_catÚlumpsum_this_monthÚ
+month_dataÚapr_valÚbal_valÚdeposited_valÚadj_amtr   r    r!   Úold_cÚnew_cÚdiff_cÚ
+month_infoÚyÚmÚcat_infoÚapr_strÚbal_strÚdep_strÚpayment_markerÚcontrib_markerÚline_strs2                                                     r   Úsinking_funds_simulationr[      s"  € ğb ĞØˆØĞ"Ø ĞØ"Ğ*Ø&(Ğ#ğ 3Ğ2 zĞ2Ñ2Ô2€Jà€Oå˜ZÑ(Ô(ğ j+ñ j+ˆà)¨A™o°Ñ<ÀÑBÀQÑFĞØ)¨A™o°Ñ<ÀÑCˆ
+Ø&¨Ñ3ˆğ ğ 	/Ø!ğ /ğ /Øu”: ’>> c¨)¤n°qÒ&8Ğ&8Ø" 9œ~°°U´¸dÑ1BÑCHØ˜	NN”N hÑ.NN‘Nøğ
+ +-Ğ'Øğ 	eğ 	eˆCØ˜6”{ˆHØĞ6Ğ6Ğ6Ø Ğ"3Ğ4Ğ8SĞT\Ô8]Ğ]Ğ]Ø'*Ğ+AÔ'BĞ$Ø'BÀ8Ô'LÈlĞ\mĞMnÔ'oĞ$Ø2BCĞ.Ñ/ØAQĞScĞ@dĞ3°HÑ=øğ @Ğ?°JĞ?Ñ?Ô?ˆØEĞE¸*ĞEÑEÔEĞØ"$Ğàğ 	0ğ 	0ˆCØv”;ˆDØĞ5Ô6ˆLØˆCØĞ*Ğ*Ğ*Ø)¨$Ô/×3Ò3°\ĞCTĞ4UĞWZÑ[Ô[à)¨CÑ/ˆNØ Ò!Ğ!Ø!$ğ 	ˆNˆNŒN˜nÑ,ˆNˆN‰NØ'5Ğ˜tÑ$Ø,/Ğ# DÑ)Ğ)ğ ğ 	8ğ 	8ˆCØv”;ˆDØ#+§<¢<°°bÑ#9Ô#9Ğ Ø!5×!9Ò!9¸<ĞIZĞ:[Ğ]`Ñ!aÔ!aĞØ! AÒ%Ğ%ØI”Ğ"4Ñ4‘Ø%7˜TÑ"øğ !Ø*Øğ
+ğ 
+ˆ
+ğ ğ (	ğ (	ˆCØv”;ˆDØ˜%”jˆGİ˜C 	œN¨AÑ.Ô.ˆGİ!Ğ"4°TÔ":¸AÑ>Ô>ˆMğ .¨dÔ3ˆGØ$&Ğ!Ø˜Š{ˆ{Ø(VÀWĞ(VĞ(VĞ(VĞ(VĞ%Ğ%Ø˜1’Ø([ÅSÈÁ\Ä\Ğ([Ğ([Ğ([Ğ([Ğ%ğ  ˆNØ˜DÔ! CÒ'Ğ'Ø!W¸<ÈÔ;MĞ!WĞ!WĞ!WĞ!Wğ *,Ğ&ØĞ6Ğ6Ğ6Ø>¸tÔD‘uØ ™Ø˜A’::Ø1kĞ[aĞ1kĞ1kĞ1kĞ1kĞ.Ğ.Ø˜a’ZZØ1pÕ[^Ğ_eÑ[fÔ[fĞ1pĞ1pĞ1pĞ1pĞ.Ğ.ğ à|Ô$×+Ò+ØØØ"Ø$1Ø)>Ø"0Ø.Hğ-ğ -ñ ô ğ ğ ğ 	×Ò˜zÑ*Ô*Ğ*Ñ*ğ ğ DİĞGÑHÔHĞHØ)ğ 	 ğ 	 ˆJØ˜6Ô"ˆAØ˜;Ô'ˆAİĞ"qĞ"Ğ"˜1Ğ"Ğ"Ğ"Ñ#Ô#Ğ#İ&‰MŒMˆMØ& |Ô4ğ  ğ  Ø% eœ_¨SÑ0Ğ7Ğ7Ğ7Ğ7Ø7˜h yÔ1Ğ7Ğ7Ğ7Ø@˜hĞ'9Ô:Ğ@Ğ@Ğ@ğ "*Ğ*AÔ!BØ!)Ğ*:Ô!;Ø!)Ğ*FÔ!Gğ<˜ &Ô)Ğ=ğ <ğ <°Ğ=ğ <ğ <Ø#Ğ;ğ<ğ <Ø.5Ğ;ğ<ğ <ğ ğ
+ "ğ 5Ø  nÑ 4Ñ4HØ!ğ 5Ø  nÑ 4Ñ4HØ!ğ 5Ø  nÑ 4Ñ4Håh‘”ğ- õ. 	Ğ)¨:°{ÑCÔCĞCàĞr   Ú__main__ÚToolsr   g      I@)r   r   r   r   zBusiness Investmentsg      T@ÚClothesg     €A@ÚSavingsg      i@Ú
+InvestmentgìQ¸…ë±?úCar Maintenanceg     €Q@ÚCondog      Y@ÚHealthr   ÚTravelg      N@éx   é<   r%   )©r   é   ©éê  é   ri   é–   )r]   rb   r`   )r   é   rg   iºÿÿÿi,  iÎÿÿÿi°ÿÿÿiÄÿÿÿ)r]   ra   rb   r^   rc   rd   )rj   é   g     0¡@)r`   rb   rh   )	r   r/   r0   r1   r2   r3   r4   r5   r6   )r   r   NNNTr   T)r[   Ú__name__Úsinking_funds_inputÚmonths_to_simulateÚlumpsums_dictÚpayment_adjustments_dictÚ future_contribution_changes_dictÚ	summariesr   r   r   ú<module>rv      s   ğğ ØØØØ $ØØØğjğ jğ jğ jğ` ˆzÒĞğ
+ ØØ$(Øğ		
+ğ 	
+ğ +ØØ$(Øğ		
+ğ 	
+ğ ØØ$(Øğ		
+ğ 	
+ğ ØØ$)Øğ		
+ğ 	
+ğ !ØØ$)Øğ		
+ğ 	
+ğ &ØØ$(Øğ	
+
+ğ 
+
+ğ ØØ$)Øğ		
+ğ 	
+ğ ØØ$(Øğ	
+ğ 
+ğ ØØ$(Øğ	
+
+ğ 
+
+ğc7Ğğt Ğğ
+ Øğ
+ğ 
+ğ
+ sğğ sğğğ €Mğ" ˜ğ
+ğ sğ
+ğ ˜ğ
+ğ sğ
+ğ sğ
+ğ
+ sğ
+ğ# ğ  Ğğ2 vğ
+ğ uğ
+ğ	(ğ (Ğ$ğ )Ğ(Ø&ØØØØ4Ø$DØØ%Øğ
+ñ 
+ô 
+€I€I€Iğa Ğr   ------  END FILE  ------
