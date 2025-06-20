@@ -1,3 +1,7 @@
 # Personal snapshot history
 data/
 *.jsonl
+
+# Byte‑code caches
+__pycache__/
+*.py[cod]
