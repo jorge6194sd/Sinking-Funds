@@ -1,18 +1,15 @@
 """
 sinking_funds/persistence.py
 ------------------------------------------------------
-Lightweight, append‑only storage for month‑end snapshots.
-
-* Each snapshot row is written as one JSON object per line (JSON‑Lines).
-* Default path: data/snapshots.jsonl  (folder created on first use).
+Append‑only JSON‑Lines storage + helper utilities.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 SNAPSHOT_DIR = Path("data")
 SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.jsonl"
@@ -26,14 +23,15 @@ class Snapshot:
     balance: float
 
 
+# ---------------------------------------------------------------------------
+
+
 def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def save_snapshot(rows: List[Snapshot], file_path: Path | None = None) -> None:
-    """
-    Append a list of Snapshot rows to disk (JSON‑Lines).
-    """
+    """Append Snapshot rows to <file> in JSON‑Lines format."""
     fp = Path(file_path) if file_path else SNAPSHOT_FILE
     _ensure_parent(fp)
     with fp.open("a", encoding="utf-8") as f:
@@ -42,11 +40,20 @@ def save_snapshot(rows: List[Snapshot], file_path: Path | None = None) -> None:
 
 
 def load_snapshots(file_path: Path | None = None) -> List[Snapshot]:
-    """
-    Load all snapshots; returns [] if file is missing.
-    """
+    """Return every Snapshot in the ledger ([] if file absent)."""
     fp = Path(file_path) if file_path else SNAPSHOT_FILE
     if not fp.exists():
         return []
     with fp.open(encoding="utf-8") as f:
         return [Snapshot(**json.loads(line)) for line in f]
+
+
+def latest_balances(file_path: Path | None = None) -> Dict[str, float]:
+    """
+    Return a dict {category → most‑recent balance} by streaming the JSONL
+    once.  Last row wins because file is chronological.
+    """
+    balances: Dict[str, float] = {}
+    for row in load_snapshots(file_path):
+        balances[row.category] = row.balance
+    return balances
