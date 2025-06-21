@@ -1,7 +1,7 @@
-# Personal snapshot history
-data/
-*.jsonl
-
-# Byte‑code caches
+# Byte‑code caches & event logs
 __pycache__/
 *.py[cod]
+
+# Data ledgers
+data/events.jsonl
+data/snapshots.jsonl
