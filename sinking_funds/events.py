@@ -1,25 +1,39 @@
 """
 sinking_funds/events.py
-------------------------------------------------------
-Dataclass, helpers, and query utilities for Event ledger.
+--------------------------------------------------------------------
+Mid‑month Event ledger I/O and helpers.
+
+*   Uses LEDGER_ROOT / "events.jsonl" as the default file.
+*   LEDGER_ROOT is controlled by the same SNAP_DIR env var so tests can
+    redirect both ledgers together.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Iterable, List
 
-# ---------- Event model ------------------------------------------------------
+# ─────────────────────────  directory selection  ────────────────────────── #
+LEDGER_ROOT = Path(os.getenv("SNAP_DIR", "data"))
+LEDGER_ROOT.mkdir(parents=True, exist_ok=True)
 
+EVENT_FILE = LEDGER_ROOT / "events.jsonl"
+# ─────────────────────────────────────────────────────────────────────────── #
+
+
+# ========================================================================== #
+#                                 Data model
+# ========================================================================== #
 class EventType(str, Enum):
-    DEPOSIT = "deposit"        # +amount
-    WITHDRAW = "withdraw"      # -amount
-    ADJUST = "adjust"          # ± amount that replaces/plugs planned deposit
-    CORRECTION = "correction"  # retro fix
+    DEPOSIT = "deposit"
+    WITHDRAW = "withdraw"
+    ADJUST = "adjust"
+    CORRECTION = "correction"
 
 
 @dataclass
@@ -31,29 +45,23 @@ class Event:
     note: str | None = None
 
 
-# ---------- File locations ---------------------------------------------------
-
-EVENT_DIR = Path("data")
-EVENT_FILE = EVENT_DIR / "events.jsonl"
-
-
-# ---------- I/O helpers ------------------------------------------------------
-
+# ========================================================================== #
+#                               File helpers
+# ========================================================================== #
 def _ensure_parent(fp: Path) -> None:
     fp.parent.mkdir(parents=True, exist_ok=True)
 
 
-def add_event(event: Event, file_path: Path | str | None = None) -> None:
-    """Append a single Event to JSON‑Lines ledger."""
+def add_event(event: Event, file_path: str | Path | None = None) -> None:
+    """Append a single Event row to the JSON‑Lines ledger."""
     fp = Path(file_path) if file_path else EVENT_FILE
     _ensure_parent(fp)
-    as_json = json.dumps(asdict(event), default=str)
     with fp.open("a", encoding="utf-8") as f:
-        f.write(as_json + "\n")
+        f.write(json.dumps(asdict(event), default=str) + "\n")
 
 
-def load_events(file_path: Path | str | None = None) -> List[Event]:
-    """Return *all* recorded Events (chronological order)."""
+def load_events(file_path: str | Path | None = None) -> List[Event]:
+    """Return every Event row (chronological order)."""
     fp = Path(file_path) if file_path else EVENT_FILE
     if not fp.exists():
         return []
@@ -61,23 +69,19 @@ def load_events(file_path: Path | str | None = None) -> List[Event]:
         return [Event(**_parse_jsonl(line)) for line in f]
 
 
-# ---------- Query helpers ----------------------------------------------------
-
-def events_between(
-    events: Iterable[Event],
-    date_from: date,
-    date_to: date,
-) -> List[Event]:
-    """Return events where  date_from ≤ ev.date < date_to ."""
-    return [e for e in events if date_from <= e.date < date_to]
+# ========================================================================== #
+#                               Query helpers
+# ========================================================================== #
+def events_between(events: Iterable[Event], d_from: date, d_to: date) -> List[Event]:
+    """Return events where  d_from ≤ event.date < d_to ."""
+    return [ev for ev in events if d_from <= ev.date < d_to]
 
 
-# ---------- internal ---------------------------------------------------------
-
+# -------------------------------------------------------------------------- #
+#                                Internals
+# -------------------------------------------------------------------------- #
 def _parse_jsonl(line: str) -> dict:
     raw = json.loads(line)
-    # convert date string back to datetime.date
-    if isinstance(raw.get("date"), str):
-        raw["date"] = datetime.fromisoformat(raw["date"]).date()
+    raw["date"] = datetime.fromisoformat(raw["date"]).date()
     raw["type"] = EventType(raw["type"])
     return raw

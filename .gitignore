@@ -5,3 +5,5 @@ __pycache__/
 # Data ledgers
 data/events.jsonl
 data/snapshots.jsonl
+
+/tests/tmp/

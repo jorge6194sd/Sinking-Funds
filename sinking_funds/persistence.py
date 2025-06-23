@@ -1,59 +1,68 @@
 """
 sinking_funds/persistence.py
-------------------------------------------------------
-Append‑only JSON‑Lines storage + helper utilities.
+--------------------------------------------------------------------
+Snapshot ledger I/O utilities.
+
+*   Uses LEDGER_ROOT / "snapshots.jsonl" as the default file.
+*   LEDGER_ROOT is read from the environment variable SNAP_DIR;
+    if SNAP_DIR is unset, it falls back to "data".
 """
 
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List
 
-SNAPSHOT_DIR = Path("data")
-SNAPSHOT_FILE = SNAPSHOT_DIR / "snapshots.jsonl"
+# ─────────────────────────  directory selection  ────────────────────────── #
+LEDGER_ROOT = Path(os.getenv("SNAP_DIR", "data"))
+LEDGER_ROOT.mkdir(parents=True, exist_ok=True)
+
+SNAPSHOT_FILE = LEDGER_ROOT / "snapshots.jsonl"
+# ─────────────────────────────────────────────────────────────────────────── #
 
 
+# ========================================================================== #
+#                                Data model
+# ========================================================================== #
 @dataclass
 class Snapshot:
     year: int
-    month: int
+    month: int            # 1‑12
     category: str
     balance: float
 
 
-# ---------------------------------------------------------------------------
-
-
-def _ensure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def save_snapshot(rows: List[Snapshot], file_path: Path | None = None) -> None:
-    """Append Snapshot rows to <file> in JSON‑Lines format."""
+# ========================================================================== #
+#                              File operations
+# ========================================================================== #
+def save_snapshot(rows: List[Snapshot], file_path: str | Path | None = None) -> None:
+    """Append one or more Snapshot rows to the ledger (JSON‑Lines)."""
     fp = Path(file_path) if file_path else SNAPSHOT_FILE
-    _ensure_parent(fp)
+    fp.parent.mkdir(parents=True, exist_ok=True)
+
     with fp.open("a", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(asdict(row)) + "\n")
 
 
-def load_snapshots(file_path: Path | None = None) -> List[Snapshot]:
-    """Return every Snapshot in the ledger ([] if file absent)."""
+def load_snapshots(file_path: str | Path | None = None) -> List[Snapshot]:
+    """Return every Snapshot row in chronological order."""
     fp = Path(file_path) if file_path else SNAPSHOT_FILE
     if not fp.exists():
         return []
+
     with fp.open(encoding="utf-8") as f:
         return [Snapshot(**json.loads(line)) for line in f]
 
 
-def latest_balances(file_path: Path | None = None) -> Dict[str, float]:
+def latest_balances(file_path: str | Path | None = None) -> Dict[str, float]:
     """
-    Return a dict {category → most‑recent balance} by streaming the JSONL
-    once.  Last row wins because file is chronological.
+    For each category, return the balance from the most recent snapshot row.
     """
-    balances: Dict[str, float] = {}
+    latest: Dict[str, Snapshot] = {}
     for row in load_snapshots(file_path):
-        balances[row.category] = row.balance
-    return balances
+        latest[row.category] = row
+    return {cat: snap.balance for cat, snap in latest.items()}
