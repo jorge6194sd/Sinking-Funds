@@ -1,14 +1,16 @@
 """
-sinking_funds package
-Public API re‑exports.
+sinking_funds package.
+
+Expose core objects.
 """
 
-from .simulation import sinking_funds_simulation
-from .persistence import Snapshot, save_snapshot, load_snapshots
+from .simulation import sinking_funds_simulation  # noqa: F401
+from .events import Event, EventType, add_event, load_events  # noqa: F401
 
 __all__ = [
     "sinking_funds_simulation",
-    "Snapshot",
-    "save_snapshot",
-    "load_snapshots",
+    "Event",
+    "EventType",
+    "add_event",
+    "load_events",
 ]
