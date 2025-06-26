@@ -1,7 +1,8 @@
 """
 sinking_funds/simulation.py
 --------------------------------------------------------------------
-Core engine with Event processing (Epic 4) — all tests green.
+Core engine with Event processing (Epic 4) — now appends a
+'__TOTAL__' meta row per month.
 """
 
 from __future__ import annotations
@@ -10,16 +11,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .events import Event, EventType, events_between, load_events
+from .events import Event, events_between, load_events
 from .persistence import Snapshot, latest_balances, save_snapshot
 
 
-# --------------------------------------------------------------------------- #
 def _first_of_next_month(d: date) -> date:
     return date(d.year + (d.month // 12), (d.month % 12) + 1, 1)
 
 
-# --------------------------------------------------------------------------- #
 def sinking_funds_simulation(  # noqa: C901
     categories: List[Dict[str, Any]],
     start_year: int = 2025,
@@ -38,7 +37,7 @@ def sinking_funds_simulation(  # noqa: C901
 ):
     """Simulate sinking‑fund balances month‑by‑month."""
 
-    # ------------------------------ defensive defaults ----------------------
+    # ───────────────────────────── defaults ─────────────────────────────── #
     lumpsums = lumpsums or {}
     payment_adjustments = payment_adjustments or {}
     future_contribution_changes = future_contribution_changes or {}
@@ -46,7 +45,7 @@ def sinking_funds_simulation(  # noqa: C901
     cats = [dict(c) for c in categories]
     cat_index = {c["name"]: c for c in cats}
 
-    # ------------------------------ opening balances ------------------------
+    # ─────────────────────── opening balances ───────────────────────────── #
     if resume and snapshot_path:
         bal: Dict[str, float] = latest_balances(snapshot_path)
     else:
@@ -54,10 +53,8 @@ def sinking_funds_simulation(  # noqa: C901
     for c in cats:
         bal.setdefault(c["name"], c.get("balance", 0.0))
 
-    # ------------------------------ load events -----------------------------
-    all_events: List[Event] = (
-        load_events(event_path) if use_events and event_path else []
-    )
+    # ───────────────────────── load events ──────────────────────────────── #
+    all_events: List[Event] = load_events(event_path) if use_events and event_path else []
 
     window_start = date(start_year, start_month, 1)
     if use_events:
@@ -68,9 +65,9 @@ def sinking_funds_simulation(  # noqa: C901
 
     month_summaries: List[Dict[str, Any]] = []
 
-    # =======================================================================
+    # ====================================================================== #
     #                               MONTH LOOP
-    # =======================================================================
+    # ====================================================================== #
     for m_idx in range(num_months):
         month_num = (start_month - 1 + m_idx) % 12 + 1
         year_num = start_year + (start_month - 1 + m_idx) // 12
@@ -79,37 +76,31 @@ def sinking_funds_simulation(  # noqa: C901
 
         markers: Dict[str, List[str]] = {n: [] for n in cat_index}
 
-        # ---------- permanent contribution changes BEFORE deposits ----------
+        # -------- contribution change before deposits --------------------- #
         for name, info in cat_index.items():
             if name in future_contribution_changes and (
-                (month_start.year, month_start.month)
-                in future_contribution_changes[name]
+                (month_start.year, month_start.month) in future_contribution_changes[name]
             ):
                 old = info["monthly_contribution"]
-                new = future_contribution_changes[name][
-                    (month_start.year, month_start.month)
-                ]
+                new = future_contribution_changes[name][(month_start.year, month_start.month)]
                 info["monthly_contribution"] = new
                 diff = new - old
-                # **changed line → legacy wording**
                 markers[name].append(
                     f"*** Monthly contribution {'increased' if diff>0 else 'decreased'} "
                     f"by ${abs(diff):.2f} ***"
                 )
 
-        # -------------------------- apply interest --------------------------
+        # ------------------------- interest -------------------------------- #
         if monthly_interest:
             for name, info in cat_index.items():
                 if info["apr"] > 0 and bal.get(name, 0.0) > 0:
                     bal[name] += bal[name] * (info["apr"] / 12)
 
-        # ------------------- deposits and payment adjustments ---------------
+        # ------------- deposits and payment adjustments ------------------- #
         deposited: Dict[str, float] = {}
         for name, info in cat_index.items():
             base = info["monthly_contribution"]
-            adj = payment_adjustments.get(name, {}).get(
-                (month_start.year, month_start.month), 0.0
-            )
+            adj = payment_adjustments.get(name, {}).get((month_start.year, month_start.month), 0.0)
             deposited[name] = max(base + adj, 0.0)
             bal[name] += deposited[name]
 
@@ -119,47 +110,29 @@ def sinking_funds_simulation(  # noqa: C901
                     f"by ${abs(adj):.2f} ***"
                 )
 
-        # -------------------------- month events ----------------------------
-        in_month_events = events_between(all_events, month_start, month_end)
-        for ev in in_month_events:
+        # ----------------------- in‑month events --------------------------- #
+        for ev in events_between(all_events, month_start, month_end):
             bal.setdefault(ev.category, 0.0)
             bal[ev.category] += ev.amount
             markers[ev.category].append(
-                f"*** {ev.type.value.upper()} {ev.amount:+.2f}"
-                f" on {ev.date.strftime('%m-%d')}"
+                f"*** {ev.type.value.upper()} {ev.amount:+.2f} on {ev.date.strftime('%m-%d')}"
                 + (f" ({ev.note})" if ev.note else "")
                 + " ***"
             )
 
-        # ------------------------------ lumpsums ----------------------------
+        # ----------------------------- lumpsums --------------------------- #
         for name in cat_index:
-            lump = lumpsums.get(name, {}).get(
-                (month_start.year, month_start.month), 0.0
-            )
+            lump = lumpsums.get(name, {}).get((month_start.year, month_start.month), 0.0)
             if lump:
                 bal[name] += lump
                 markers[name].append(f"*** LUMP SUM +{lump:.2f} ***")
 
-        # --------------------- summary row & snapshot -----------------------
-        month_row = {
-            "year": month_start.year,
-            "month_num": month_start.month,
-            "categories": [],
-        }
+        # ------------------- build summary & snapshots -------------------- #
+        month_row = {"year": month_start.year, "month_num": month_start.month, "categories": []}
         snap_rows: List[Snapshot] = []
 
         for name, info in cat_index.items():
             bal[name] = round(bal[name], 2)
-
-            payment_marker = next(
-                (m for m in markers[name] if m.startswith("*** Payment")), ""
-            )
-            lumpsum_marker = next(
-                (m for m in markers[name] if m.startswith("*** LUMP SUM")), ""
-            )
-            contrib_marker = next(
-                (m for m in markers[name] if m.startswith("*** Monthly contribution")), ""
-            )
 
             month_row["categories"].append(
                 {
@@ -167,28 +140,33 @@ def sinking_funds_simulation(  # noqa: C901
                     "apr": info["apr"],
                     "balance": bal[name],
                     "amount_deposited": round(deposited.get(name, 0.0), 2),
-                    "payment_change_marker": payment_marker,
-                    "lumpsum_marker": lumpsum_marker,
-                    "contribution_change_marker": contrib_marker,
+                    "payment_change_marker": next(
+                        (m for m in markers[name] if m.startswith("*** Payment")), ""
+                    ),
+                    "lumpsum_marker": next(
+                        (m for m in markers[name] if m.startswith("*** LUMP SUM")), ""
+                    ),
+                    "contribution_change_marker": next(
+                        (m for m in markers[name] if m.startswith("*** Monthly contribution")), ""
+                    ),
                     "markers": " ".join(markers[name]),
                 }
             )
-            snap_rows.append(
-                Snapshot(month_start.year, month_start.month, name, bal[name])
-            )
+            snap_rows.append(Snapshot(month_start.year, month_start.month, name, bal[name]))
+
+        # ------------- append total meta‑row (NOT in summary) ------------- #
+        total_balance = round(sum(bal[n] for n in cat_index), 2)
+        snap_rows.append(Snapshot(month_start.year, month_start.month, "__TOTAL__", total_balance))
 
         save_snapshot(snap_rows, snapshot_path)
         month_summaries.append(month_row)
 
-    # ------------------------- optional console output ---------------------
+    # ------------------------- console output ----------------------------- #
     if verbose:
         for m in month_summaries:
             print(f"\n{m['year']}-{m['month_num']:02d}")
             print("-" * 50)
             for c in m["categories"]:
-                print(
-                    f"{c['name']:<15} Bal: ${c['balance']:<8}"
-                    + ("  " + c["markers"] if c["markers"] else "")
-                )
+                print(f"{c['name']:<18} Bal: ${c['balance']:<8}" + ("  " + c["markers"] if c["markers"] else ""))
 
     return month_summaries

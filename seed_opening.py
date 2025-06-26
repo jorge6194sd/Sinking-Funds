@@ -15,5 +15,11 @@ rows = [
     Snapshot(2025, 6, "Law School", 0.0),
 ]
 
+
+# append total
+total = round(sum(r.balance for r in rows), 2)
+rows.append(Snapshot(2025, 6, "__TOTAL__", total))
+
+
 save_snapshot(rows)        # writes data/snapshots.jsonl
 print(" Opening snapshot for 2025/06/30 written.")
