@@ -7,3 +7,5 @@ data/events.jsonl
 data/snapshots.jsonl
 
 /tests/tmp/
+
+playground/
