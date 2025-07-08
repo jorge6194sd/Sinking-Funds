@@ -13,3 +13,4 @@ testpaths = ["tests"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+dev  = ["pyyaml>=6", "pendulum>=2"]   
