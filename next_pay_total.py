@@ -1,78 +1,66 @@
+#!/usr/bin/env python3
 """
 next_pay_total.py
-────────────────────────────────────────────────────────────────────
-1. Calculates the lump‑sum you should transfer from checking to your
-   savings account on the next payday.
-2. Shows your *current* grand total across all sinking‑fund buckets
-   (based on the latest snapshot) and what the new total will be
-   **after** this deposit.
-3. Optionally writes one Event row per category so you don’t have to
-   call the CLI seven times.
+-------------------------------------------------------------------
+Show how much cash to move from checking to savings for upcoming
+recurring deposits.
 
-Run:
-    python next_pay_total.py
+Reads:   data/recurring.yaml
+Writes:  nothing
+Usage:
+    python next_pay_total.py          # look ahead 14 days (default)
+    python next_pay_total.py 7        # look ahead 7 days
 """
 
 from __future__ import annotations
 
-import json
-from datetime import date
+import sys
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
-from sinking_funds.events import Event, add_event
-from sinking_funds.persistence import latest_balances
+import yaml
 
-# ────────────────── 1. CONFIGURE YOUR BI‑WEEKLY PLAN ────────────────── #
-DEPOSITS: Dict[str, float] = {
-    "Clothes": 10,
-    "Condo fund": 50,
-    "Savings": 150,
-    "Health": 20,
-    "Tools": 20,
-    "Business": 60,
-    "Car maintenance": 0,
-    # add/remove categories as needed
-}
-
-# Next payday
-PAYDATE = date(2025, 6, 27)  # <–– change each time you run
-
-# Path to the snapshot ledger (keep default unless you moved the file)
-SNAPSHOT_FILE = Path("data/snapshots.jsonl")
-# ─────────────────────────────────────────────────────────────────────── #
+RULES_FILE = Path("data/recurring.yaml")
+DEFAULT_WINDOW = 14  # days
 
 
-def main() -> None:
-    # --- 2. calculate lump‑sum to move ---------------------------------
-    lump_sum = sum(DEPOSITS.values())
-    print(f"\n➡️  Transfer  ${lump_sum:.2f}  from checking to savings on {PAYDATE}.")
+def load_rules(fp: Path) -> List[Dict]:
+    if not fp.exists():
+        return []
+    return yaml.safe_load(fp.read_text()) or []
 
-    # --- 3. show current vs projected grand total ----------------------
-    current_total = sum(latest_balances(SNAPSHOT_FILE).values()) if SNAPSHOT_FILE.exists() else 0.0
-    projected_total = current_total + lump_sum
-    print(f"   Current sinking‑fund total:  ${current_total:.2f}")
-    print(f"   Projected total after pay:  ${projected_total:.2f}\n")
 
-    # --- 4. ask user whether to log events -----------------------------
-    choice = input("Log these deposits as Events now? [y/N] ").strip().lower()
-    if choice == "y":
-        for cat, amt in DEPOSITS.items():
-            if amt:               # skip zero‑amount categories
-                add_event(
-                    Event(
-                        date=PAYDATE,
-                        category=cat,
-                        amount=amt,
-                        note="Bi‑weekly paycheck deposit",
-                    )
-                )
-        print("✅  Events written to data/events.jsonl")
-    else:
-        print("ℹ️  No events logged; you can run this script again later.")
+def upcoming_totals(rules: List[Dict], *, window_days: int) -> Dict[date, float]:
+    today = date.today()
+    horizon = today + timedelta(days=window_days)
+    totals: Dict[date, float] = {}
 
-    print("Done.")
+    for rule in rules:
+        due = date.fromisoformat(rule["next_due"])
+        if today <= due <= horizon:
+            totals.setdefault(due, 0.0)
+            totals[due] += rule["amount"]
+
+    return totals
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        window = int(sys.argv[1])
+    except (IndexError, ValueError):
+        window = DEFAULT_WINDOW
+
+    rules = load_rules(RULES_FILE)
+    schedule = upcoming_totals(rules, window_days=window)
+
+    if not schedule:
+        print(f"No deposits due in the next {window} days.")
+        sys.exit(0)
+
+    for paydate, total in sorted(schedule.items()):
+        print(f"Send ${total:.2f} from checking to savings on {paydate.isoformat()}.")
+
+    if len(schedule) > 1:
+        grand = sum(schedule.values())
+        print(f"\nTotal for the next {window} days: ${grand:.2f}")
