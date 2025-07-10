@@ -1,0 +1,11 @@
+# data/recurring.yaml
+# Sample recurring‑deposit rules  (edit to fit your income cadence)
+- category: Savings
+  amount: 150
+  every: 14d            # every 14 days
+  next_due: 2025-07-12  # first upcoming payday
+
+- category: Condo fund
+  amount: 50
+  every: monthly        # same calendar day each month
+  next_due: 2025-08-01
